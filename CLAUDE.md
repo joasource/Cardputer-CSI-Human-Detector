@@ -13,9 +13,14 @@
   was tested on Linux harnesses + headless Chromium only. A local session
   with the Cardputer plugged in can finally flash it and read the serial
   log: do the **Hardware test checklist** below before new features.
-- **Release `v0.2.0` exists** (tag on `7ed3bc9`, asset
-  `cardputer-csi-v0.2.0.bin` for the web flasher). To rebuild it without
-  touching the tag: `gh workflow run release.yml -f tag=v0.2.0`
+- **Release `v0.3.0`** adds: CSI auto-recovery after a WiFi drop
+  (`serviceCsi` retries `WiFi.reconnect()` every 10 s, then `enableCsi()` +
+  recalibration), env `cardputer-radar-csi-heap` (1 Hz `# heap livre:` serial
+  line via `RADAR_HEAPLOG`), narrow-landscape fix for the phone `#stats` grid
+  (CSS only, not checked in a browser). Compiles; NOT tested on hardware.
+  `v0.2.0` (tag on `7ed3bc9`) was the previous, hardware-validated release.
+  To rebuild a release without touching the tag:
+  `gh workflow run release.yml -f tag=v0.3.0`
   (`workflow_dispatch`; re-running updates the existing release asset).
   A force-push of a tag at the same SHA does NOT trigger a new run.
 
@@ -170,19 +175,14 @@ Information (CSI). Realistic target: on-device **presence + motion**.
    the AP and its frames are still used → keep it still.
 
 ## Known issues (found, not fixed)
-- Phone page overflows horizontally on small landscape phones (667x375,
-  568x320): the 4-column `#stats` grid ("CONTACTS"/"THRESH" labels) is wider
-  than the panel. Pre-existing; 844x390 and portrait are fine.
+- Phone page on small landscape phones (667x375, 568x320): `#stats` grid was
+  overflowing; v0.3.0 shrinks fonts/gap there, unverified in a browser.
 - CSI is taken from every transmitter on the channel; a change in the
   traffic mix (a new device starts talking) can raise the variance without
   motion. If false CONTACTs show up on hardware, a per-transmitter baseline
   (or AP-only CSI) is the next fix.
 - `RADAR_FAKE=1` doesn't compile: `serviceFake()` uses `camBlips` before its
   declaration (pre-existing).
-- After a WiFi drop, `serviceCsi()` sets `wifiReady = false` and nothing
-  re-enables CSI until the WiFi picker runs or the device reboots.
-- No free-heap logging exists anywhere in the firmware (needed for the
-  hardware test, see checklist).
 - Stale leftovers from the original setup: `.claude/settings.json` allows
   only two PowerShell `pio.exe` commands for envs that no longer exist
   (`sensor-s3`, `cardputer-radar-wifi`) under another machine's path; the
@@ -203,9 +203,8 @@ Information (CSI). Realistic target: on-device **presence + motion**.
    available), try the IP and `http://radar.local/`, press THR−/THR+/CAL/
    palette on the phone and confirm the Cardputer follows; footer shows the
    phone count; reload/lock the phone and check it reconnects.
-5. **Heap:** add a temporary 1 Hz log of `ESP.getFreeHeap()` /
-   `ESP.getMinFreeHeap()` (e.g. next to the `st` event in `serviceWeb()`),
-   run with EXT PANEL ON and 3 phones connected, note the minimum, then
+5. **Heap:** flash env `cardputer-radar-csi-heap` (prints `# heap livre:`
+   at 1 Hz), run with EXT PANEL ON and 3 phones connected, note the minimum, then
    remove it or keep it behind a flag.
 6. Write the results into **Status** below (replace the ⚠️ lines).
 
@@ -213,8 +212,7 @@ Information (CSI). Realistic target: on-device **presence + motion**.
 1. **Hardware test of the phone view** (checklist steps 1, 4, 5).
 2. **Hardware test of calibration/threshold** (checklist steps 2, 3):
    tune `kCsiFullScale` / `kCalMinSpread` from the serial ceilings/σ.
-3. **Auto-recover CSI after WiFi reconnects** (`enableCsi()` already starts
-   a fresh calibration).
+3. Hardware-check the WiFi auto-recovery (turn the router/AP off and on).
 4. **Port sensor to ESP32-C5** (MonsterC5): better CSI PHY (Wi-Fi 6), but
    `wifi_csi_acquire_config_t` is different — missing fields like `lltf_en`,
    `sig_mode`, `secondary_channel`, `ant`.

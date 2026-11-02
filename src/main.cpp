@@ -721,17 +721,35 @@ static void serviceCsi() {
     if (now - last < 66) return;
     last = now;
 
+    static bool     dropped   = false;   // CSI was running and WiFi went away
+    static uint32_t lastRetry = 0;
     if (!wifiReady || WiFi.status() != WL_CONNECTED) {
         if (wifiReady) {
             // WiFi just dropped — stop CSI and clear frozen state. A calibration
             // in progress is dropped; enableCsi() starts a new one on reconnect.
             wifiReady   = false;
+            dropped     = true;
+            lastRetry   = now;
             holdCnt     = 0;
             gCal.active = false;
             gCalPct     = -1;
             gCalWaiting = false;
             esp_wifi_set_csi(false);
             esp_wifi_set_promiscuous(false);
+            Serial.println("# WiFi caiu: CSI pausado");
+        } else if (dropped) {
+            if (WiFi.status() == WL_CONNECTED) {
+                // Back (possibly on another channel/IP): restart CSI + calibration.
+                dropped = false;
+                strncpy(wifiIP, WiFi.localIP().toString().c_str(), sizeof(wifiIP) - 1);
+                wifiIP[sizeof(wifiIP) - 1] = 0;
+                wifiReady = true;
+                enableCsi();
+                Serial.printf("# WiFi reconectou: %s  IP:%s\n# CSI ativo\n", WiFi.SSID().c_str(), wifiIP);
+            } else if (now - lastRetry >= 10000) {
+                lastRetry = now;
+                WiFi.reconnect();
+            }
         }
         return;  // no frames injected → radar goes stale → NO LINK shown
     }
@@ -1304,6 +1322,11 @@ static void serviceWeb() {
     gCsiFps = lastSt ? (cnt - lastCnt) * 1000 / (now - lastSt) : 0;
     lastCnt = cnt;
     lastSt  = now;
+#ifdef RADAR_HEAPLOG
+    Serial.printf("# heap livre:%u min:%u maior bloco:%u viewers:%d\n",
+                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
+                  (unsigned)ESP.getMaxAllocHeap(), (int)web.sseClients());
+#endif
     if (web.sseClients() > 0) {
       char b[640];
       TextBuf o{b, sizeof(b)};
