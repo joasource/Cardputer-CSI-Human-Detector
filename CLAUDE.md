@@ -8,7 +8,7 @@
 - The user writes in **Portuguese (pt-BR)**; answer in Portuguese. Keep code,
   commits and this file in English.
 - `main` @ `7ed3bc9` = PR #1 merged: phone view + real threshold/calibration.
-  Everything below describes `main`. Start new work on a branch off `main`.
+  Everything below describes `main`. Commit directly to `main` (no feature branches; user preference).
 - **Nothing in PR #1 has run on hardware yet.** It compiled for ESP32-S3 and
   was tested on Linux harnesses + headless Chromium only. A local session
   with the Cardputer plugged in can finally flash it and read the serial
