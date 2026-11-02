@@ -6,7 +6,7 @@ Ele usa Channel State Information (CSI), ou seja, o mesmo Wi-Fi que o seu rotead
 
 O projeto todo custa cerca de US$ 50. O Cardputer ADV custa US$ 30, pegue [duas telas TFT destas por US$ 20](https://a.co/d/0bZbfTqO), arrume alguém com uma impressora 3D e pronto: você tem um radar de humanos portátil com cara de totalmente fora de controle. Estou muito, muito feliz com o resultado.
 
-> **Versão em português (pt-BR)** com melhorias e tradução completa por **Joaquim Ferreira** — [joaquimfsneto@gmail.com](mailto:joaquimfsneto@gmail.com).
+> **Este é um fork em português (pt-BR).** O projeto e o texto original são de **TalkingSasquach** ([skizzophrenic/Cardputer-CSI-Human-Detector](https://github.com/skizzophrenic/Cardputer-CSI-Human-Detector)), licenciado sob MIT. Melhorias e tradução completa por **Joaquim Ferreira** — [joaquimfsneto@gmail.com](mailto:joaquimfsneto@gmail.com). Os trechos em primeira pessoa abaixo ("fiz", "estou feliz") são do autor original.
 
 ---
 
@@ -141,4 +141,4 @@ Estamos de acordo com isso? Deixe um comentário no vídeo e me conte.
 
 ---
 
-Melhorias e tradução para pt-BR: **Joaquim Ferreira** — [joaquimfsneto@gmail.com](mailto:joaquimfsneto@gmail.com)
+Projeto original: **TalkingSasquach** (MIT). Melhorias e tradução para pt-BR: **Joaquim Ferreira** — [joaquimfsneto@gmail.com](mailto:joaquimfsneto@gmail.com)

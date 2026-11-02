@@ -875,10 +875,12 @@ static void drawMenu() {
 
     // credits (dim, below the rows, out of the way of navigation)
     canvas.setTextColor(canvas.color565(70, 70, 70), cBg);
+    const char* cr0 = "Original: TalkingSasquach";
     const char* cr1 = "Melhorias: Joaquim Ferreira";
     const char* cr2 = "joaquimfsneto@gmail.com";
-    canvas.drawString(cr1, (W - canvas.textWidth(cr1)) / 2, H - 36);
-    canvas.drawString(cr2, (W - canvas.textWidth(cr2)) / 2, H - 26);
+    canvas.drawString(cr0, (W - canvas.textWidth(cr0)) / 2, 97);
+    canvas.drawString(cr1, (W - canvas.textWidth(cr1)) / 2, 105);
+    canvas.drawString(cr2, (W - canvas.textWidth(cr2)) / 2, 113);
 
     // footer
     canvas.fillRect(0, H - 14, W, 14, cBar);
@@ -2127,7 +2129,7 @@ static void serviceKeys() {
 void setup() {
   auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);
-  Serial.println("# Radar WiFi-CSI - melhorias e traducao pt-BR: Joaquim Ferreira <joaquimfsneto@gmail.com>");
+  Serial.println("# Radar WiFi-CSI - original: TalkingSasquach (MIT) | melhorias e traducao pt-BR: Joaquim Ferreira <joaquimfsneto@gmail.com>");
   M5Cardputer.Display.setRotation(1);
   M5Cardputer.Display.fillScreen(TFT_BLACK);
 

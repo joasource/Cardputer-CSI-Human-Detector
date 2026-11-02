@@ -93,8 +93,10 @@ Information (CSI). Realistic target: on-device **presence + motion**.
   `# Vista no celular: http://<ip>/  (http://radar.local/)`,
   `# Calibracao CSI: mantenha a sala parada`,
   `# Calibracao CSI concluida: N amostras, teto amp X (sigma Y), teto fase X (sigma Y)`.
+- This repo is a fork (parent skizzophrenic/…, MIT © TalkingSasquach): keep
+  the original author credited next to the fork credits.
 - UI is in pt-BR (device screens ASCII-only, phone page with accents). Credits
-  "Melhorias: Joaquim Ferreira <joaquimfsneto@gmail.com>" appear in the
+  "Original: TalkingSasquach / Melhorias: Joaquim Ferreira <joaquimfsneto@gmail.com>" appear in the
   settings menu, the QR card, the serial boot line and the phone page footer.
 - Release: pushing a `v*` tag (or running the workflow manually with a `tag`
   input) runs `.github/workflows/release.yml`, which
