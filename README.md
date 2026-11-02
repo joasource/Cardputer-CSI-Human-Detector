@@ -35,6 +35,22 @@ Both screens are running at the same time showing different things (not a clone,
 
 ---
 
+## No external screen? Use your phone
+
+The Cardputer also serves the radar scope as a web page, so your phone can be the second screen. No app to install: it's just a page in the phone's browser.
+
+1. Make sure your phone is on the **same WiFi** as the Cardputer.
+2. After boot, the built-in screen shows a **QR code**. Scan it with the phone camera (or press `q` to bring it back).
+3. You can also type the IP shown in the title bar, e.g. `http://192.168.1.42/`, or try `http://radar.local/`.
+
+The phone draws the full scope itself (PPI sweep and the vaporwave 3D view, so tap the scope to switch) plus the motion graph, threshold buttons, palette switch, and an optional sonar sound. Only a few numbers per frame cross the WiFi (~15 updates/s over Server-Sent Events), so it stays smooth.
+
+If you don't have the external TFT at all, open the settings menu (`` ` ``) and turn **EXT PANEL** down to **OFF**. The Cardputer then stops rendering the top scope and frees its ~86 KB frame buffer.
+
+Want to tweak the page without flashing? Open `web/index.html` straight from disk in a browser (or add `?demo` to the URL) and it runs on fake data.
+
+---
+
 ## Flash the pre-built binary (easiest)
 
 Don't want to deal with PlatformIO? Grab the latest `.bin` from the [Releases page](../../releases) and flash it in your browser using [ESP Web Flasher](https://esptool.spacehuhn.com/):
@@ -66,6 +82,8 @@ pio run -e cardputer-radar-csi -t upload
 | `c` | Trigger calibration (empty-room baseline) |
 | `,` | Decrease detection threshold |
 | `/` | Increase detection threshold |
+| `.` | Switch the top scope between PPI and 3D view |
+| `q` | Show the QR code / URL for the phone view |
 | `` ` `` | Open settings menu |
 
 ---
@@ -77,7 +95,9 @@ pio run -e cardputer-radar-csi -t upload
 ├── partitions.csv          8MB dual-OTA partition table
 ├── include/
 │   ├── radar_link.h        Protocol parser, state, 240-sample motion history
-│   └── ext_panel.h         External ILI9341 panel driver
+│   ├── ext_panel.h         External ILI9341 panel driver
+│   └── web_view.h          Tiny non-blocking HTTP + SSE server for the phone view
+├── web/index.html          Phone view page (embedded into the firmware at build time)
 └── src/main.cpp            Dual-screen radar UI, CSI callbacks, key handling
 ```
 

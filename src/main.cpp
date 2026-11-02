@@ -8,6 +8,11 @@
 //   RADAR_FAKE = 0          : live frames from the Monster C5 over Serial1/Grove.
 //
 // Keys:  c = calibrate    , = threshold-    / = threshold+    ` = settings menu
+//        q = phone view QR code (CSI build)
+//
+// Phone view (CSI build): the Cardputer serves web/index.html on port 80 and
+// streams live frames over Server-Sent Events, so a phone on the same WiFi
+// can show the radar scope instead of (or as well as) the external TFT.
 // =============================================================================
 #include <M5Cardputer.h>
 #include <M5Unified.h>
@@ -44,9 +49,15 @@ static char     wifiIP[16] = "---";
 // ── On-device CSI sensing ─────────────────────────────────────────────────────
 #if defined(RADAR_CSI)
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include "esp_wifi.h"
+#include "web_view.h"
 static bool  wifiReady = false;
 static char  wifiIP[16] = "---";
+
+static WebView  web;                 // phone view: HTTP + SSE on port 80
+static bool     gQrShow  = false;    // QR card on the built-in screen
+static uint32_t gQrSeen  = 0;        // web.sseConnects() when the card opened
 
 static const int  kCsiWindow  = 50;
 static float      gCsiAmpBuf[kCsiWindow];
@@ -64,8 +75,33 @@ static const float kCsiThresh  = 0.15f;
 
 static void IRAM_ATTR promiscuousRxCb(void*, wifi_promiscuous_pkt_type_t) {}
 
+// Stations that send unicast traffic to us: in practice, the phone showing
+// the web radar. Promiscuous mode also hears their uplink frames, and a phone
+// moving in someone's hand would read as motion, so CSI from those
+// transmitters is skipped. Frames the AP sends us (including the ones that
+// relay the phone's traffic) are still used. Both WiFi callbacks run on the
+// WiFi task, so these tables need no locking.
+static uint8_t gMyMac[6]     = {};
+static uint8_t gPeerMac[4][6];
+static uint8_t gPeerCount    = 0;
+static uint8_t gPeerNext     = 0;
+
+static bool IRAM_ATTR isPeerMac(const uint8_t* m) {
+    for (int i = 0; i < gPeerCount; i++)
+        if (memcmp(gPeerMac[i], m, 6) == 0) return true;
+    return false;
+}
+
+static void IRAM_ATTR learnPeerMac(const uint8_t* m) {
+    if (isPeerMac(m)) return;
+    memcpy(gPeerMac[gPeerNext], m, 6);
+    gPeerNext = (gPeerNext + 1) % 4;
+    if (gPeerCount < 4) gPeerCount++;
+}
+
 static void IRAM_ATTR csiCallback(void*, wifi_csi_info_t* info) {
     if (!info || !info->buf || info->len < 4) return;
+    if (isPeerMac(info->mac)) return;
     gCsiCount++;
     int8_t* b   = info->buf;
     int  nPairs = info->len / 2;
@@ -196,6 +232,19 @@ static void applyExtBrightness() {
     }
 }
 
+// The 240x180 top canvas is ~86 KB of the no-PSRAM heap, so it only exists
+// while the external panel is enabled (EXT PANEL above OFF).
+static void setExtPanelOn(bool on) {
+    if (on && !extReady) {
+        topCanvas.setColorDepth(16);
+        extReady = (topCanvas.createSprite(240, 180) != nullptr);  // 240x180 * EXT_ZOOM = 320x240, fills panel
+    } else if (!on && extReady) {
+        topCanvas.deleteSprite();
+        extReady = false;
+        extPanel.fillScreen(TFT_BLACK);
+    }
+}
+
 static void saveSettings() {
     Preferences prefs;
     prefs.begin("radar", false);
@@ -214,7 +263,8 @@ static void loadSettings() {
     prefs.end();
     if (gColorIdx >= kNumPalettes) gColorIdx = 0;
     if (gBright    < 10 || gBright    > 100) gBright    = 80;
-    if (gExtBright < 10 || gExtBright > 100) gExtBright = 80;
+    // 0 = external panel off (no TFT attached, e.g. using the phone view)
+    if (gExtBright != 0 && (gExtBright < 10 || gExtBright > 100)) gExtBright = 80;
     applyPalette(gColorIdx);
 }
 
@@ -353,6 +403,7 @@ static void enableCsi() {
     gCsiPhaVarMax = 0.001f; gCsiPhaVarMin = 0.0f;
     memset(gCsiAmpBuf, 0, sizeof(gCsiAmpBuf));
     memset(gCsiPhaBuf, 0, sizeof(gCsiPhaBuf));
+    esp_wifi_get_mac(WIFI_IF_STA, gMyMac);
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_promiscuous_rx_cb(promiscuousRxCb);
     wifi_csi_config_t cfg = {};
@@ -634,9 +685,16 @@ static void menuAdjust(int dir) {
             gBright = (uint8_t)constrain((int)gBright + (dir > 0 ? 10 : -10), 10, 100);
             M5Cardputer.Display.setBrightness((uint8_t)((uint32_t)gBright * 255 / 100));
             break;
-        case 2:
-            gExtBright = (uint8_t)constrain((int)gExtBright + (dir > 0 ? 10 : -10), 10, 100);
+        case 2: {
+            // 10..100 %, and one step below 10 turns the panel OFF: the top
+            // scope is not rendered or pushed over SPI at all (no TFT fitted).
+            int v = (int)gExtBright + (dir > 0 ? 10 : -10);
+            if (v < 10) v = (dir > 0) ? 10 : 0;
+            if (v > 100) v = 100;
+            gExtBright = (uint8_t)v;
+            setExtPanelOn(v > 0);
             break;
+        }
 #if defined(RADAR_CSI)
         case 3:
             gMenuOpen = false;
@@ -686,7 +744,10 @@ static void drawMenu() {
         switch (i) {
             case 0: snprintf(val, sizeof(val), "%s", kPalettes[gColorIdx].name); break;
             case 1: snprintf(val, sizeof(val), "%d%%", (int)gBright); break;
-            case 2: snprintf(val, sizeof(val), "%d%%", (int)gExtBright); break;
+            case 2:
+                if (gExtBright == 0) strncpy(val, "OFF", sizeof(val));
+                else snprintf(val, sizeof(val), "%d%%", (int)gExtBright);
+                break;
 #if defined(RADAR_CSI)
             case 3: {
                 String cur = WiFi.SSID();
@@ -799,8 +860,23 @@ static void drawBottom() {
            (int)(s.motion * 100), s.rssi, (int)(gThreshold * 100));
   canvas.setTextColor(cCyan, TFT_BLACK);
   canvas.drawString(foot, 4, gy + gh + 4);
+#if defined(RADAR_CSI)
+  // phone glyph + number of phones watching the web view
+  const int viewers = web.sseClients();
+  if (viewers > 0) {
+    const int px = W - 20, py = gy + gh + 3;
+    canvas.drawRoundRect(px, py, 6, 9, 1, cCyan);
+    canvas.drawFastHLine(px + 2, py + 6, 2, cCyan);
+    char nv[4];
+    snprintf(nv, sizeof(nv), "%d", viewers);
+    canvas.drawString(nv, px + 8, py + 1);
+  }
   canvas.setTextColor(cPurple, TFT_BLACK);
-  canvas.drawString(",.mode [c]cal  [ [ ]thr-  [ ] ]thr+", 4, gy + gh + 15);
+  canvas.drawString("c:cal ,/:thr .:view q:phone", 4, gy + gh + 15);
+#else
+  canvas.setTextColor(cPurple, TFT_BLACK);
+  canvas.drawString("c:cal ,/:thr .:view `:menu", 4, gy + gh + 15);
+#endif
 
   // outer frame + corner dots
   canvas.drawFastHLine(0,   0,   W, cBorder);
@@ -877,8 +953,14 @@ static volatile int      gSniffVendor  = 0;
 static volatile bool     gSniffPending = false;
 
 static void IRAM_ATTR sniffCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
-    if (gSniffPending) return;
     const wifi_promiscuous_pkt_t* pkt = (const wifi_promiscuous_pkt_t*)buf;
+    // Uplink data frame (ToDS=1, FromDS=0) whose final destination (addr3) is
+    // us: addr2 is a station talking to the Cardputer, e.g. the phone view.
+    if (type == WIFI_PKT_DATA && pkt->rx_ctrl.sig_len >= 24) {
+        const uint8_t* h = pkt->payload;
+        if ((h[1] & 0x03) == 0x01 && memcmp(h + 16, gMyMac, 6) == 0) learnPeerMac(h + 10);
+    }
+    if (gSniffPending) return;
     if (pkt->rx_ctrl.sig_len < 16) return;
     const uint8_t* src = pkt->payload + 10;  // Address 2 = source MAC in all common frame types
     for (int i = 0; i < kNumCamOuis; i++) {
@@ -925,6 +1007,192 @@ static void serviceCam() {
     camBlips[slot].active   = true;
     strncpy(camBlips[slot].vendor, kCamOuis[vendorIdx].name, 7);
     camBlips[slot].vendor[7] = '\0';
+}
+#endif  // RADAR_CSI
+
+// Threshold step shared by the keyboard and the phone view. Snapped to 5 %
+// steps so repeated float adds don't drift (0.30 showing as 29 %).
+static void nudgeThreshold(float d) {
+  gThreshold = roundf((gThreshold + d) * 20.0f) / 20.0f;
+  if (gThreshold < 0.05f) gThreshold = 0.05f;
+  if (gThreshold > 0.95f) gThreshold = 0.95f;
+#if !RADAR_FAKE
+  radar.setThreshold(gThreshold);
+#endif
+}
+
+// --------------------------------------------------------------------------
+// Phone view: web/index.html is embedded at build time (board_build.
+// embed_txtfiles) and served by WebView. The phone draws the scope itself
+// from a ~15 Hz frame stream, so the Cardputer only ships numbers:
+//   (default) {"q":seq,"p":presence,"m":motion‰,"r":rssi,"t":threshold%}
+//   st        status at 1 Hz: ip, ssid, channel, battery, palette, CSI fps, cams
+//   hist      motion history (0..100) once per new client
+// Phone -> Cardputer: GET /cmd?k=dn | k=up (threshold) | k=pal (palette)
+// --------------------------------------------------------------------------
+#if defined(RADAR_CSI)
+extern const uint8_t kWebPage[]    asm("_binary_web_index_html_start");
+extern const uint8_t kWebPageEnd[] asm("_binary_web_index_html_end");
+static bool     gWebUp   = false;
+static uint32_t gCsiFps  = 0;
+
+// Bounded append-only text buffer (truncates instead of overflowing).
+struct TextBuf {
+  char*  p;
+  size_t cap;
+  size_t n;
+  TextBuf(char* buf, size_t size) : p(buf), cap(size), n(0) { if (cap) p[0] = '\0'; }
+  void add(const char* fmt, ...) __attribute__((format(printf, 2, 3))) {
+    if (n + 1 >= cap) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vsnprintf(p + n, cap - n, fmt, ap);
+    va_end(ap);
+    if (w > 0) n = (n + (size_t)w < cap) ? n + (size_t)w : cap - 1;
+  }
+};
+
+static void addStatusJson(TextBuf& o) {
+  wifi_ap_record_t ap = {};
+  char ssid[66] = "";
+  if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+    // JSON-escape the SSID: only quote/backslash need it; drop control bytes
+    size_t j = 0;
+    for (size_t i = 0; ap.ssid[i] && i < sizeof(ap.ssid) && j + 2 < sizeof(ssid); i++) {
+      char ch = (char)ap.ssid[i];
+      if ((uint8_t)ch < 0x20) continue;
+      if (ch == '"' || ch == '\\') ssid[j++] = '\\';
+      ssid[j++] = ch;
+    }
+    ssid[j] = '\0';
+  }
+  const Palette& pl = kPalettes[gColorIdx];
+  o.add("{\"ip\":\"%s\",\"ss\":\"%s\",\"ch\":%d,\"bat\":%d,\"chg\":%d,"
+        "\"pa\":[%u,%u,%u,%u,%u,%u],\"csi\":%lu,\"n\":%d,\"cam\":[",
+        wifiIP, ssid, (int)ap.primary, (int)M5.Power.getBatteryLevel(),
+        M5.Power.isCharging() == 1 ? 1 : 0,
+        pl.aR, pl.aG, pl.aB, pl.bR, pl.bG, pl.bB,
+        (unsigned long)gCsiFps, web.sseClients());
+  const uint32_t now = millis();
+  bool first = true;
+  for (int i = 0; i < 8; i++) {
+    const CamBlip& cb = camBlips[i];
+    if (!cb.active || now - cb.lastSeen > CAM_LIFE) continue;
+    o.add("%s[\"%s\",%d,%d,%d]", first ? "" : ",", cb.vendor, (int)cb.rssi,
+          (int)lroundf(cb.ang * 1000.0f), (int)lroundf(cb.rad * 10.0f));
+    first = false;
+  }
+  o.add("]}");
+}
+
+// Raw SSE text sent once to each new stream, right after the headers.
+static size_t onWebHello(char* buf, size_t cap) {
+  TextBuf o{buf, cap};
+  o.add("event: hist\ndata: [");
+  for (int i = 0; i < RadarLink::historySize(); i++)
+    o.add(i ? ",%d" : "%d", (int)lroundf(radar.historyAt(i) * 100.0f));
+  o.add("]\n\nevent: st\ndata: ");
+  addStatusJson(o);
+  o.add("\n\n");
+  return o.n;
+}
+
+static void onWebCmd(const char* q) {
+  if (!strcmp(q, "k=dn"))       nudgeThreshold(-0.05f);
+  else if (!strcmp(q, "k=up"))  nudgeThreshold(+0.05f);
+  else if (!strcmp(q, "k=pal")) { applyPalette((gColorIdx + 1) % kNumPalettes); saveSettings(); }
+}
+
+static void serviceWeb() {
+  const uint32_t now = millis();
+  if (!gWebUp) {
+    static uint32_t lastTry = 0;
+    if (!wifiReady || (lastTry && now - lastTry < 3000)) return;
+    lastTry = now;
+    gWebUp = web.begin(80, kWebPage, (size_t)(kWebPageEnd - kWebPage) - 1,  // drop trailing NUL
+                       onWebCmd, onWebHello);
+    if (!gWebUp) return;
+    if (MDNS.begin("radar")) MDNS.addService("http", "tcp", 80);
+    Serial.printf("# Phone view: http://%s/  (http://radar.local/)\n", wifiIP);
+    gQrShow = true;                      // offer the QR once after boot
+    gQrSeen = web.sseConnects();
+  }
+  web.poll();
+  if (gQrShow && web.sseConnects() != gQrSeen) gQrShow = false;   // a phone opened it
+
+  static uint32_t lastSeq = 0;
+  const auto& s = radar.state();
+  if (s.seq != lastSeq) {
+    lastSeq = s.seq;
+    if (web.sseClients() > 0) {
+      char d[80];
+      snprintf(d, sizeof(d), "{\"q\":%lu,\"p\":%d,\"m\":%d,\"r\":%d,\"t\":%d}",
+               (unsigned long)s.seq, s.presence ? 1 : 0, (int)lroundf(s.motion * 1000.0f),
+               s.rssi, (int)lroundf(gThreshold * 100.0f));
+      web.broadcast(nullptr, d);
+    }
+  }
+
+  static uint32_t lastSt = 0, lastCnt = 0;
+  if (now - lastSt >= 1000) {
+    const uint32_t cnt = gCsiCount;
+    gCsiFps = lastSt ? (cnt - lastCnt) * 1000 / (now - lastSt) : 0;
+    lastCnt = cnt;
+    lastSt  = now;
+    if (web.sseClients() > 0) {
+      char b[640];
+      TextBuf o{b, sizeof(b)};
+      addStatusJson(o);
+      web.broadcast("st", b);
+    }
+  }
+}
+
+// Built-in screen card: QR code + URL for the phone view.
+static void drawQr() {
+  const int W = canvas.width(), H = canvas.height();
+  const uint16_t cBar = canvas.color565(20, 0, 35);
+  const uint16_t cDim = canvas.color565(110, 110, 110);
+  canvas.fillSprite(TFT_BLACK);
+  canvas.fillRect(0, 0, W, 14, cBar);
+  canvas.drawFastHLine(0, 13, W, gColA);
+  canvas.setTextSize(1);
+  canvas.setTextColor(gColA, cBar);
+  const char* hdr = ">> PHONE VIEW <<";
+  canvas.drawString(hdr, (W - canvas.textWidth(hdr)) / 2, 3);
+
+  if (!wifiReady || !gWebUp) {
+    canvas.setTextColor(TFT_RED, TFT_BLACK);
+    const char* m = "No WiFi yet";
+    canvas.drawString(m, (W - canvas.textWidth(m)) / 2, H / 2 - 4);
+    canvas.pushSprite(0, 0);
+    return;
+  }
+
+  char url[32];
+  snprintf(url, sizeof(url), "http://%s/", wifiIP);
+  // White border = quiet zone of ~2 modules around the 25x25 code.
+  canvas.fillRect(4, 17, 116, 116, TFT_WHITE);
+  canvas.qrcode(url, 8, 21, 108, 2);
+
+  const int tx = 126;
+  canvas.setTextColor(gColB, TFT_BLACK);
+  canvas.drawString("Scan with your", tx, 20);
+  canvas.drawString("phone camera", tx, 30);
+  canvas.setTextColor(cDim, TFT_BLACK);
+  canvas.drawString("or open:", tx, 46);
+  canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+  canvas.drawString(wifiIP, tx, 57);
+  canvas.setTextColor(cDim, TFT_BLACK);
+  canvas.drawString("radar.local", tx, 68);
+  canvas.drawString("same WiFi needed", tx, 84);
+  char nv[20];
+  snprintf(nv, sizeof(nv), "phones: %d", web.sseClients());
+  canvas.setTextColor(gColB, TFT_BLACK);
+  canvas.drawString(nv, tx, 100);
+  canvas.setTextColor(canvas.color565(70, 70, 70), TFT_BLACK);
+  canvas.drawString("any key: close", tx, 120);
+  canvas.pushSprite(0, 0);
 }
 #endif  // RADAR_CSI
 
@@ -1669,20 +1937,15 @@ static void serviceKeys() {
         gMenuOpen = false;
       }
     } else {
+#if defined(RADAR_CSI)
+      if (gQrShow) { gQrShow = false; continue; }          // any key closes the QR card
+      if (c == 'q' || c == 'Q') { gQrShow = true; gQrSeen = web.sseConnects(); continue; }
+#endif
       if      (c == '`')             { gMenuOpen = true; gMenuCursor = 0; }
       else if (c == '.')             gViewMode = (gViewMode + 1) % 2;
       else if (c == 'c' || c == 'C') radar.calibrate();
-      else if (c == ',') {
-        gThreshold -= 0.05f; if (gThreshold < 0.05f) gThreshold = 0.05f;
-#if !RADAR_FAKE
-        radar.setThreshold(gThreshold);
-#endif
-      } else if (c == '/') {
-        gThreshold += 0.05f; if (gThreshold > 0.95f) gThreshold = 0.95f;
-#if !RADAR_FAKE
-        radar.setThreshold(gThreshold);
-#endif
-      }
+      else if (c == ',')             nudgeThreshold(-0.05f);
+      else if (c == '/')             nudgeThreshold(+0.05f);
     }
   }
 }
@@ -1699,12 +1962,11 @@ void setup() {
   extPanel.init();
   extPanel.setRotation(7);
   extPanel.fillScreen(TFT_BLACK);
-  topCanvas.setColorDepth(16);
-  extReady = (topCanvas.createSprite(240, 180) != nullptr);  // 240x180 * EXT_ZOOM = 320x240, fills panel
 
   randomSeed(micros());
   loadSettings();
   applyBrightness();
+  setExtPanelOn(gExtBright > 0);   // EXT PANEL = OFF: no top canvas at all
 
 #if RADAR_FAKE
   camBlips[0].mac3[0] = 0x65; camBlips[0].mac3[1] = 0xDE; camBlips[0].mac3[2] = 0xAA;
@@ -1735,6 +1997,7 @@ void loop() {
 #elif defined(RADAR_CSI)
   serviceCsi();
   serviceCam();
+  serviceWeb();
 #elif defined(RADAR_UDP)
   serviceUDP();
 #else
@@ -1743,10 +2006,16 @@ void loop() {
 
   uint32_t now = millis();
 
-
   static uint32_t lastBot = 0, lastTop = 0;
-  if (now - lastBot >= 33) { lastBot = now; if (gMenuOpen) drawMenu(); else drawBottom(); }
-  if (extReady && now - lastTop >= 125) {
+  if (now - lastBot >= 33) {
+    lastBot = now;
+    if (gMenuOpen) drawMenu();
+#if defined(RADAR_CSI)
+    else if (gQrShow) drawQr();
+#endif
+    else drawBottom();
+  }
+  if (extReady && gExtBright > 0 && now - lastTop >= 125) {
     lastTop = now;
     if (gViewMode == 0) drawTop(); else drawRaycaster();
   }

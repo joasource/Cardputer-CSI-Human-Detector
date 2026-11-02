@@ -21,6 +21,10 @@ Information (CSI). Realistic target: on-device **presence + motion**.
     blips — radius from RSSI, size/heat from motion).
   - Bottom = built-in 1.14" (240x135): WiFi IP, status pill, PRESENCE/CLEAR
     banner, scrolling motion graph, threshold + key hints.
+  - **Phone view** (CSI build): the Cardputer serves `web/index.html` on port 80
+    (`http://<ip>/`, `http://radar.local/`, QR on `q`) and streams frames over
+    SSE (`/ev`); the phone redraws the top scope itself. Lets the device run
+    with no external TFT (menu EXT PANEL = OFF frees the 86 KB top canvas).
 - **No router needed:** S3 is the AP; Cardputer connects directly to it.
   The Cardputer's own WiFi traffic generates the CSI frames the S3 measures.
 
@@ -56,6 +60,12 @@ Information (CSI). Realistic target: on-device **presence + motion**.
   `drawRaycaster()` (vaporwave 3D mode), `serviceKeys()`, fake generator.
   Bottom @30 fps, top @~8 fps.
 - `include/ext_panel.h` — external ILI9341 panel class.
+- `include/web_view.h` — dependency-free, never-blocking HTTP + SSE server
+  (raw lwIP sockets, MSG_DONTWAIT). Routes: `/`, `/ev`, `/cmd?k=dn|up|pal`.
+- `web/index.html` — phone view page, linked into flash via
+  `board_build.embed_txtfiles`. Opening it from disk (or `?demo`) runs on
+  fake data. SSE events: default frame `{"q","p","m"‰,"r","t"%}`, `st`
+  (1 Hz status), `hist` (240-sample history on connect).
 - `tools/sensor_s3/` — S3 CSI sensor firmware (AP mode, UDP broadcast).
 - `tools/fake_c5/fake_c5.ino` — spare-S3 UART protocol emitter.
 
