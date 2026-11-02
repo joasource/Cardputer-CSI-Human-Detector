@@ -87,11 +87,15 @@ Information (CSI). Realistic target: on-device **presence + motion**.
     (download mode), upload, then unplug/replug to run.
   - The first boot after a fresh flash opens the on-device WiFi picker and
     waits for the keyboard: the user has to pick the network on the device.
-- Serial lines worth grepping (`#` prefix = log, not data):
-  `# CSI WiFi: <ssid>  IP:<ip>`, `# CSI active`,
-  `# Phone view: http://<ip>/  (http://radar.local/)`,
-  `# CSI calibration: keep the room still`,
-  `# CSI calibration done: N samples, amp ceil X (sigma Y), pha ceil X (sigma Y)`.
+- Serial lines worth grepping (`#` prefix = log, not data; translated to
+  pt-BR on 2026-11-02, no accents on device/serial):
+  `# WiFi CSI: <ssid>  IP:<ip>`, `# CSI ativo`,
+  `# Vista no celular: http://<ip>/  (http://radar.local/)`,
+  `# Calibracao CSI: mantenha a sala parada`,
+  `# Calibracao CSI concluida: N amostras, teto amp X (sigma Y), teto fase X (sigma Y)`.
+- UI is in pt-BR (device screens ASCII-only, phone page with accents). Credits
+  "Melhorias: Joaquim Ferreira <joaquimfsneto@gmail.com>" appear in the
+  settings menu, the QR card, the serial boot line and the phone page footer.
 - Release: pushing a `v*` tag (or running the workflow manually with a `tag`
   input) runs `.github/workflows/release.yml`, which
   builds and merges a flash-at-0x0 `.bin` for the web flasher

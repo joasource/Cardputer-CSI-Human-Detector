@@ -164,10 +164,10 @@ static const float     EXT_ZOOM   = 320.0f / 240.0f;   // 240x180 * 1.333 = 320x
 struct Palette { uint8_t aR,aG,aB, bR,bG,bB; const char* name; };
 static const Palette kPalettes[] = {
     { 220,   0, 200,   0, 220, 220, "MAGENTA" },
-    {   0, 220,  80,   0, 180, 100,  "GREEN"  },
-    { 255, 180,   0, 220, 140,   0,  "AMBER"  },
-    { 255,  40,  40, 255, 120,  40,  "RED"    },
-    {  40, 120, 255,   0, 200, 255,  "BLUE"   },
+    {   0, 220,  80,   0, 180, 100,  "VERDE"  },
+    { 255, 180,   0, 220, 140,   0,  "AMBAR"  },
+    { 255,  40,  40, 255, 120,  40,  "VERMELHO" },
+    {  40, 120, 255,   0, 200, 255,  "AZUL"   },
 };
 static const uint8_t kNumPalettes = 5;
 
@@ -331,7 +331,7 @@ static void initWiFi() {
     canvas.setTextSize(1);
     canvas.setTextColor(gColB, TFT_BLACK);
     char msg[48];
-    snprintf(msg, sizeof(msg), "Joining %s...", HOME_SSID);
+    snprintf(msg, sizeof(msg), "Conectando a %s...", HOME_SSID);
     canvas.drawString(msg, (canvas.width() - canvas.textWidth(msg)) / 2, canvas.height() / 2 - 4);
     canvas.pushSprite(0, 0);
     delay(200);
@@ -342,7 +342,7 @@ static void initWiFi() {
     strncpy(wifiIP, WiFi.localIP().toString().c_str(), sizeof(wifiIP) - 1);
     Serial.printf("# WiFi: %s  IP:%s\n", HOME_SSID, wifiIP);
   } else {
-    Serial.println("# WiFi failed — rebooting");
+    Serial.println("# Falha no WiFi — reiniciando");
     delay(1000);
     ESP.restart();
   }
@@ -432,7 +432,7 @@ static void startCalibration() {
     gCal.n           = 0;
     gCalPct          = 0;
     gCalWaiting      = false;
-    Serial.println("# CSI calibration: keep the room still");
+    Serial.println("# Calibracao CSI: mantenha a sala parada");
 }
 
 // ln-variance ceiling of one channel (sorts v). Motion only ever adds
@@ -462,8 +462,8 @@ static void finishCalibration() {
     gCal.active  = false;
     gCalPct      = -1;
     gCalWaiting  = false;
-    Serial.printf("# CSI calibration done: %d samples, amp ceil %.2f (sigma %.2f), "
-                  "pha ceil %.2f (sigma %.2f)\n", gCal.n, gCal.ampCeil, sa, gCal.phaCeil, sp);
+    Serial.printf("# Calibracao CSI concluida: %d amostras, teto amp %.2f (sigma %.2f), "
+                  "teto fase %.2f (sigma %.2f)\n", gCal.n, gCal.ampCeil, sa, gCal.phaCeil, sp);
 }
 
 static int calProgress(uint32_t now) {
@@ -552,9 +552,9 @@ static bool runWifiPicker() {
     // scan ────────────────────────────────────────────────────────────────────
     int n = 0;
     auto doScan = [&]() {
-        canvas.fillSprite(cBg); hdr(">> WIFI SELECT <<");
+        canvas.fillSprite(cBg); hdr(">> ESCOLHER WIFI <<");
         canvas.setTextSize(1); canvas.setTextColor(gColB, cBg);
-        const char* sm = "Scanning...";
+        const char* sm = "Buscando redes...";
         canvas.drawString(sm, (W - canvas.textWidth(sm)) / 2, H / 2 - 4);
         ftr(""); canvas.pushSprite(0, 0);
         n = WiFi.scanNetworks();
@@ -567,12 +567,12 @@ static bool runWifiPicker() {
     const int rowH = 14, visRows = (H - 29) / rowH;
 
     while (pickedIdx < 0) {
-        canvas.fillSprite(cBg); hdr(">> WIFI SELECT <<");
+        canvas.fillSprite(cBg); hdr(">> ESCOLHER WIFI <<");
         if (n == 0) {
             canvas.setTextSize(1); canvas.setTextColor(canvas.color565(80, 80, 80), cBg);
-            const char* nm = "No networks found";
+            const char* nm = "Nenhuma rede encontrada";
             canvas.drawString(nm, (W - canvas.textWidth(nm)) / 2, H / 2 - 4);
-            ftr("any key:rescan  `:cancel");
+            ftr("tecla:buscar  `:cancelar");
         } else {
             for (int vi = 0; vi < visRows; vi++) {
                 int ni = scroll + vi; if (ni >= n) break;
@@ -587,7 +587,7 @@ static bool runWifiPicker() {
                 canvas.setTextColor(sel ? gColB : canvas.color565(50, 50, 50), cBg);
                 canvas.drawString(rhs, W - canvas.textWidth(rhs) - 3, y + 3);
             }
-            ftr(";/.:nav  /:select  `:cancel");
+            ftr(";/.:nav  /:escolher  `:cancelar");
         }
         canvas.pushSprite(0, 0);
 
@@ -629,13 +629,13 @@ static bool runWifiPicker() {
 
         for (;;) {
             canvas.fillSprite(cBg);
-            char h[30]; snprintf(h, sizeof(h), "PWD: %.18s", newSsid); hdr(h);
+            char h[30]; snprintf(h, sizeof(h), "SENHA: %.18s", newSsid); hdr(h);
             int pl = (int)strlen(newPass);
             char stars[65]; memset(stars, '*', pl); stars[pl] = '\0';
             char field[70]; snprintf(field, sizeof(field), "> %s_", stars);
             canvas.setTextSize(1); canvas.setTextColor(TFT_WHITE, cBg);
             canvas.drawString(field, 8, H / 2 - 6);
-            ftr("type pwd  /:confirm  `:cancel"); canvas.pushSprite(0, 0);
+            ftr("digite  /:ok  `:cancelar"); canvas.pushSprite(0, 0);
 
             char c = waitKey();
             if (c == '/') break;
@@ -649,8 +649,8 @@ static bool runWifiPicker() {
     }
 
     // connect ─────────────────────────────────────────────────────────────────
-    canvas.fillSprite(cBg); hdr(">> CONNECTING <<");
-    char cm[48]; snprintf(cm, sizeof(cm), "Joining %s...", newSsid);
+    canvas.fillSprite(cBg); hdr(">> CONECTANDO <<");
+    char cm[48]; snprintf(cm, sizeof(cm), "Conectando a %s...", newSsid);
     canvas.setTextSize(1); canvas.setTextColor(gColB, cBg);
     canvas.drawString(cm, (W - canvas.textWidth(cm)) / 2, H / 2 - 4); canvas.pushSprite(0, 0);
 
@@ -668,7 +668,7 @@ static bool runWifiPicker() {
         canvas.drawString(sm, (W - canvas.textWidth(sm)) / 2, H / 2 - 4);
     } else {
         canvas.setTextSize(1); canvas.setTextColor(TFT_RED, cBg);
-        const char* fm = "Connection failed!";
+        const char* fm = "Falha na conexao!";
         canvas.drawString(fm, (W - canvas.textWidth(fm)) / 2, H / 2 - 4);
     }
     canvas.pushSprite(0, 0); delay(1500);
@@ -693,7 +693,7 @@ static void initCsi() {
         canvas.fillSprite(TFT_BLACK);
         canvas.setTextSize(1);
         canvas.setTextColor(gColB, TFT_BLACK);
-        char msg[48]; snprintf(msg, sizeof(msg), "Joining %s...", savedSsid);
+        char msg[48]; snprintf(msg, sizeof(msg), "Conectando a %s...", savedSsid);
         canvas.drawString(msg, (canvas.width() - canvas.textWidth(msg)) / 2, canvas.height() / 2 - 4);
         canvas.pushSprite(0, 0);
         delay(200);
@@ -705,9 +705,9 @@ static void initCsi() {
     }
     strncpy(wifiIP, WiFi.localIP().toString().c_str(), sizeof(wifiIP) - 1);
     wifiReady = true;
-    Serial.printf("# CSI WiFi: %s  IP:%s\n", savedSsid, wifiIP);
+    Serial.printf("# WiFi CSI: %s  IP:%s\n", savedSsid, wifiIP);
     enableCsi();
-    Serial.println("# CSI active");
+    Serial.println("# CSI ativo");
 }
 
 static void serviceCsi() {
@@ -828,15 +828,15 @@ static void drawMenu() {
     canvas.drawFastHLine(0, 13, W, gColA);
     canvas.setTextSize(1);
     canvas.setTextColor(gColA, cBar);
-    const char* hdr = ">> SETTINGS <<";
+    const char* hdr = ">> AJUSTES <<";
     canvas.drawString(hdr, (W - canvas.textWidth(hdr)) / 2, 3);
 
     // menu rows
 #if defined(RADAR_CSI)
-    const char* const labels[] = { "PALETTE", "SCREEN", "EXT PANEL", "WIFI NET" };
+    const char* const labels[] = { "PALETA", "TELA", "PAINEL EXT", "REDE WIFI" };
     const int numItems = 4, rowH = 20, textOff = 6;
 #else
-    const char* const labels[] = { "PALETTE", "SCREEN", "EXT PANEL" };
+    const char* const labels[] = { "PALETA", "TELA", "PAINEL EXT" };
     const int numItems = 3, rowH = 24, textOff = 8;
 #endif
     for (int i = 0; i < numItems; i++) {
@@ -854,14 +854,14 @@ static void drawMenu() {
             case 0: snprintf(val, sizeof(val), "%s", kPalettes[gColorIdx].name); break;
             case 1: snprintf(val, sizeof(val), "%d%%", (int)gBright); break;
             case 2:
-                if (gExtBright == 0) strncpy(val, "OFF", sizeof(val));
+                if (gExtBright == 0) strncpy(val, "DESL", sizeof(val));
                 else snprintf(val, sizeof(val), "%d%%", (int)gExtBright);
                 break;
 #if defined(RADAR_CSI)
             case 3: {
                 String cur = WiFi.SSID();
                 if (cur.length() > 0) snprintf(val, sizeof(val), "%.12s", cur.c_str());
-                else strncpy(val, "> SCAN", sizeof(val));
+                else strncpy(val, "> BUSCAR", sizeof(val));
                 break;
             }
 #endif
@@ -873,11 +873,18 @@ static void drawMenu() {
         if (i < numItems - 1) canvas.drawFastHLine(8, y + rowH - 2, W - 16, cSep);
     }
 
+    // credits (dim, below the rows, out of the way of navigation)
+    canvas.setTextColor(canvas.color565(70, 70, 70), cBg);
+    const char* cr1 = "Melhorias: Joaquim Ferreira";
+    const char* cr2 = "joaquimfsneto@gmail.com";
+    canvas.drawString(cr1, (W - canvas.textWidth(cr1)) / 2, H - 36);
+    canvas.drawString(cr2, (W - canvas.textWidth(cr2)) / 2, H - 26);
+
     // footer
     canvas.fillRect(0, H - 14, W, 14, cBar);
     canvas.drawFastHLine(0, H - 14, W, gColA);
     canvas.setTextColor(cDim, cBar);
-    const char* hint = ";/.:nav  ,//:change  `:save";
+    const char* hint = ";/.:nav  ,//:mudar  `:salvar";
     canvas.drawString(hint, (W - canvas.textWidth(hint)) / 2, H - 11);
 
     canvas.pushSprite(0, 0);
@@ -925,7 +932,7 @@ static void drawBottom() {
   canvas.drawString("[ WiFi-CSI RADAR/UART ]", (W - canvas.textWidth("[ WiFi-CSI RADAR/UART ]")) / 2, 3);
 #endif
   drawBatIcon(canvas, 2, 3);
-  const char* tag  = !linkOk ? "NO LINK" : (calib ? "CAL" : s.mode);
+  const char* tag  = !linkOk ? "SEM LINK" : (calib ? "CAL" : s.mode);
   uint16_t    pill = !linkOk ? TFT_RED : (calib ? canvas.color565(255, 140, 0) : canvas.color565(0, 180, 80));
   int tw = canvas.textWidth(tag) + 8;
   canvas.fillRoundRect(W - tw - 3, 1, tw, 11, 3, pill);
@@ -939,7 +946,7 @@ static void drawBottom() {
     canvas.drawRoundRect(4, 17, W - 8, 34, 4, cOrange);
     canvas.setTextSize(2);
     canvas.setTextColor(cOrange, bg);
-    const char* lbl = "CALIBRATING";
+    const char* lbl = "CALIBRANDO";
     canvas.drawString(lbl, (W - canvas.textWidth(lbl)) / 2, 21);
     const int bx = 14, by = 41, bw = W - 28;
     canvas.drawRect(bx, by, bw, 6, canvas.color565(110, 60, 0));
@@ -950,7 +957,7 @@ static void drawBottom() {
     canvas.fillRoundRect(4, 17, W - 8, 34, 4, bg);
     canvas.drawRoundRect(4, 17, W - 8, 34, 4, border);
     canvas.setTextSize(2);
-    const char* lbl = present ? ">> CONTACT <<" : "~~ CLEAR ~~";
+    const char* lbl = present ? ">> CONTATO <<" : "~~ LIVRE ~~";
     canvas.setTextColor(present ? canvas.color565(255, 100, 255) : cCyan, bg);
     canvas.drawString(lbl, (W - canvas.textWidth(lbl)) / 2, 25);
   }
@@ -967,8 +974,8 @@ static void drawBottom() {
   if (cols > n) cols = n;
   int xoff = (gw - 2) - cols;
   if (calRun) {
-    const char* l1 = gCalWaiting ? "waiting for WiFi traffic" : "keep still or step away";
-    const char* l2 = gCalWaiting ? "no CSI frames yet"        : "learning the empty room";
+    const char* l1 = gCalWaiting ? "aguardando trafego WiFi" : "fique parado ou se afaste";
+    const char* l2 = gCalWaiting ? "sem quadros CSI ainda"    : "aprendendo a sala vazia";
     char pct[8];
     snprintf(pct, sizeof(pct), "%d%%", gCalPct);
     canvas.setTextColor(gCalWaiting ? cOrange : cCyan, TFT_BLACK);
@@ -992,7 +999,7 @@ static void drawBottom() {
 
   // footer
   char foot[48];
-  snprintf(foot, sizeof(foot), "mot %3d%%  rssi %ddBm  thr %2d%%",
+  snprintf(foot, sizeof(foot), "mov %3d%%  rssi %ddBm  lim %2d%%",
            (int)(s.motion * 100), s.rssi, (int)lroundf(gThreshold * 100));
   canvas.setTextColor(cCyan, TFT_BLACK);
   canvas.drawString(foot, 4, gy + gh + 4);
@@ -1008,10 +1015,10 @@ static void drawBottom() {
     canvas.drawString(nv, px + 8, py + 1);
   }
   canvas.setTextColor(cPurple, TFT_BLACK);
-  canvas.drawString("c:cal ,/:thr .:view q:phone", 4, gy + gh + 15);
+  canvas.drawString("c:cal ,/:lim .:vista q:cel", 4, gy + gh + 15);
 #else
   canvas.setTextColor(cPurple, TFT_BLACK);
-  canvas.drawString("c:cal ,/:thr .:view `:menu", 4, gy + gh + 15);
+  canvas.drawString("c:cal ,/:lim .:vista `:menu", 4, gy + gh + 15);
 #endif
 
   // outer frame + corner dots
@@ -1264,7 +1271,7 @@ static void serviceWeb() {
                        onWebCmd, onWebHello);
     if (!gWebUp) return;
     if (MDNS.begin("radar")) MDNS.addService("http", "tcp", 80);
-    Serial.printf("# Phone view: http://%s/  (http://radar.local/)\n", wifiIP);
+    Serial.printf("# Vista no celular: http://%s/  (http://radar.local/)\n", wifiIP);
     gQrShow = true;                      // offer the QR once after boot
     gQrSeen = web.sseConnects();
   }
@@ -1313,12 +1320,12 @@ static void drawQr() {
   canvas.drawFastHLine(0, 13, W, gColA);
   canvas.setTextSize(1);
   canvas.setTextColor(gColA, cBar);
-  const char* hdr = ">> PHONE VIEW <<";
+  const char* hdr = ">> VISTA NO CELULAR <<";
   canvas.drawString(hdr, (W - canvas.textWidth(hdr)) / 2, 3);
 
   if (!wifiReady || !gWebUp) {
     canvas.setTextColor(TFT_RED, TFT_BLACK);
-    const char* m = "No WiFi yet";
+    const char* m = "Sem WiFi ainda";
     canvas.drawString(m, (W - canvas.textWidth(m)) / 2, H / 2 - 4);
     canvas.pushSprite(0, 0);
     return;
@@ -1332,21 +1339,23 @@ static void drawQr() {
 
   const int tx = 126;
   canvas.setTextColor(gColB, TFT_BLACK);
-  canvas.drawString("Scan with your", tx, 20);
-  canvas.drawString("phone camera", tx, 30);
+  canvas.drawString("Aponte a camera", tx, 20);
+  canvas.drawString("do celular", tx, 30);
   canvas.setTextColor(cDim, TFT_BLACK);
-  canvas.drawString("or open:", tx, 46);
+  canvas.drawString("ou abra:", tx, 46);
   canvas.setTextColor(TFT_WHITE, TFT_BLACK);
   canvas.drawString(wifiIP, tx, 57);
   canvas.setTextColor(cDim, TFT_BLACK);
   canvas.drawString("radar.local", tx, 68);
-  canvas.drawString("same WiFi needed", tx, 84);
+  canvas.drawString("mesmo WiFi!", tx, 84);
   char nv[20];
-  snprintf(nv, sizeof(nv), "phones: %d", web.sseClients());
+  snprintf(nv, sizeof(nv), "celulares: %d", web.sseClients());
   canvas.setTextColor(gColB, TFT_BLACK);
   canvas.drawString(nv, tx, 100);
   canvas.setTextColor(canvas.color565(70, 70, 70), TFT_BLACK);
-  canvas.drawString("any key: close", tx, 120);
+  canvas.drawString("tecla: fechar", tx, 110);
+  canvas.setTextColor(canvas.color565(70, 70, 70), TFT_BLACK);
+  canvas.drawString("por J. Ferreira", tx, 122);
   canvas.pushSprite(0, 0);
 }
 #endif  // RADAR_CSI
@@ -1693,8 +1702,8 @@ static void drawRaycaster() {
   topCanvas.setTextColor(topCanvas.color565(120, 0, 148), topCanvas.color565(5, 0, 15));
   topCanvas.drawString("N", rCx - 2,         rCy - rV + 3);
   topCanvas.drawString("S", rCx - 2,         rCy + rV - 10);
-  topCanvas.drawString("E", rCx + rH - 10,   rCy - 4);
-  topCanvas.drawString("W", rCx - rH + 2,    rCy - 4);
+  topCanvas.drawString("L", rCx + rH - 10,   rCy - 4);
+  topCanvas.drawString("O", rCx - rH + 2,    rCy - 4);
 
   // ── CONTACTS: glitchy stick figures ──────────────────────────────────────
   // Perspective-scaled humanoid silhouette. High motion strength scatters
@@ -1789,10 +1798,10 @@ static void drawRaycaster() {
   topCanvas.drawString(title, (W - topCanvas.textWidth(title)) / 2, 3);
   drawBatIcon(topCanvas, 2, 3);
 #if defined(RADAR_CSI)
-  const char* mStr = wifiReady ? "WiFi OK" : "No WiFi";
+  const char* mStr = wifiReady ? "WiFi OK" : "Sem WiFi";
   topCanvas.setTextColor(wifiReady ? topCanvas.color565(0, 210, 80) : TFT_RED, cBar);
 #else
-  const char* mStr = linkOk ? s.mode : "NO LINK";
+  const char* mStr = linkOk ? s.mode : "SEM LINK";
   topCanvas.setTextColor(linkOk ? cCyan : TFT_RED, cBar);
 #endif
   topCanvas.drawString(mStr, W - topCanvas.textWidth(mStr) - 4, 3);
@@ -1802,7 +1811,7 @@ static void drawRaycaster() {
   topCanvas.fillRect(0, H - barH, W, barH, cBar);
   topCanvas.drawFastHLine(0, H - barH, W, cBorder);
   const bool calRun = linkOk && gCalPct >= 0;
-  const char* ctlbl = calRun ? "CALIBRATING" : present ? ">>CONTACT<<" : " scanning.. ";
+  const char* ctlbl = calRun ? "CALIBRANDO" : present ? ">>CONTATO<<" : " varrendo.. ";
   uint16_t ctCol = calRun
     ? (blink ? topCanvas.color565(255, 140, 0) : topCanvas.color565(120, 60, 0))
     : present
@@ -1949,7 +1958,7 @@ static void drawTop() {
                        cx + (int)(R * cosf(a)),        cy + (int)(R * sinf(a)), cPurple);
   }
   topCanvas.setTextSize(1);
-  const char* cLbl[4]  = { "N", "E", "S", "W" };
+  const char* cLbl[4]  = { "N", "L", "S", "O" };
   const float cBase[4] = { -TAU / 4.0f, 0.0f, TAU / 4.0f, TAU / 2.0f };
   for (int ci = 0; ci < 4; ci++) {
     float a = cBase[ci] + BEAR;
@@ -2033,10 +2042,10 @@ static void drawTop() {
   topCanvas.drawString(title, (W - topCanvas.textWidth(title)) / 2, 3);
   drawBatIcon(topCanvas, 2, 3);
 #if defined(RADAR_CSI)
-  const char* modeStr = wifiReady ? "WiFi OK" : "No WiFi";
+  const char* modeStr = wifiReady ? "WiFi OK" : "Sem WiFi";
   topCanvas.setTextColor(wifiReady ? topCanvas.color565(0, 210, 80) : TFT_RED, cBar);
 #else
-  const char* modeStr = !linkOk ? "NO LINK" : s.mode;
+  const char* modeStr = !linkOk ? "SEM LINK" : s.mode;
   topCanvas.setTextColor(!linkOk ? TFT_RED : cCyan, cBar);
 #endif
   topCanvas.drawString(modeStr, W - topCanvas.textWidth(modeStr) - 4, 3);
@@ -2045,7 +2054,7 @@ static void drawTop() {
   topCanvas.fillRect(0, H - 14, W, 14, cBar);
   topCanvas.drawFastHLine(0, H - 14, W, cBorder);
   const bool calRun = linkOk && gCalPct >= 0;
-  const char* ctlbl = calRun ? "CALIBRATING" : present ? ">>CONTACT<<" : " scanning.. ";
+  const char* ctlbl = calRun ? "CALIBRANDO" : present ? ">>CONTATO<<" : " varrendo.. ";
   uint16_t ctCol = calRun
     ? (blink ? topCanvas.color565(255, 140, 0) : topCanvas.color565(120, 60, 0))
     : present
@@ -2118,6 +2127,7 @@ static void serviceKeys() {
 void setup() {
   auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);
+  Serial.println("# Radar WiFi-CSI - melhorias e traducao pt-BR: Joaquim Ferreira <joaquimfsneto@gmail.com>");
   M5Cardputer.Display.setRotation(1);
   M5Cardputer.Display.fillScreen(TFT_BLACK);
 

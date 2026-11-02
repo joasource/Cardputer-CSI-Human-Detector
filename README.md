@@ -1,10 +1,12 @@
-# Cardputer Human Detector
+# Cardputer Detector de Humanos
 
-This tiny cyber deck is detecting people using Wi-Fi. No camera. No IR sensor. No thermal camera. Just Wi-Fi and this deeply cursed little radar screen.
+Este mini cyber deck detecta pessoas usando Wi-Fi. Sem câmera. Sem sensor infravermelho. Sem câmera térmica. Só Wi-Fi e esta tela de radar profundamente amaldiçoada.
 
-It uses Channel State Information (CSI), specifically the same Wi-Fi your router is already blasting everywhere, to detect when people are moving around. The human body is mostly water, and water messes with radio waves in very measurable ways. So we measure them.
+Ele usa Channel State Information (CSI), ou seja, o mesmo Wi-Fi que o seu roteador já está espalhando por aí, para detectar quando há gente se movendo. O corpo humano é feito principalmente de água, e a água bagunça as ondas de rádio de um jeito bem mensurável. Então a gente mede.
 
-The whole build is around $50. Cardputer ADV is $30, grab [two of these TFT screens for $20](https://a.co/d/0bZbfTqO), find somebody with a 3D printer, and you've got yourself a handheld human radar that looks absolutely unhinged. I'm really, really happy with how this came out.
+O projeto todo custa cerca de US$ 50. O Cardputer ADV custa US$ 30, pegue [duas telas TFT destas por US$ 20](https://a.co/d/0bZbfTqO), arrume alguém com uma impressora 3D e pronto: você tem um radar de humanos portátil com cara de totalmente fora de controle. Estou muito, muito feliz com o resultado.
+
+> **Versão em português (pt-BR)** com melhorias e tradução completa por **Joaquim Ferreira** — [joaquimfsneto@gmail.com](mailto:joaquimfsneto@gmail.com).
 
 ---
 
