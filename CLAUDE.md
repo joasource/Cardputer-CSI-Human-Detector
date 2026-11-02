@@ -14,11 +14,27 @@ Information (CSI). Realistic target: on-device **presence + motion**.
   (`RADAR_CSI=1`). WiFi creds are picked on-device and stored in NVS
   (`wificreds`); no creds in the repo.
 - **CSI pipeline** (`src/main.cpp`, `csiCallback` → `serviceCsi`): mean
-  amplitude + mean sin(phase) per frame over a 50-frame window → variance,
-  normalized by a running floor/max → motion = 60 % amplitude + 40 % phase.
-  Presence = motion > `kCsiThresh` (0.15, fixed), then holds/fades for 10 s.
-  `serviceCsi` injects `R,<seq>,<pres>,<motion>,<rssi>,RUN` lines into
+  amplitude + mean sin(phase) per frame over a 50-frame window → variance
+  (`gCsiAmpVar`, `gCsiPhaVar`). `serviceCsi` scores each against an
+  empty-room baseline: `score = ln(var / ceiling) / ln(20)`, clamped 0..1,
+  motion = max(amplitude, phase). 0 % = as quiet as the empty room; threshold
+  35 % = 2.9x the ceiling, 100 % = 20x (`kCsiFullScale`).
+  Presence = motion > `gThreshold` (user-set, 5–95 % in 5 % steps, NVS
+  `radar/thr`), then held 10 s. Reported motion is the raw score (no fade),
+  so the graph shows exactly what the threshold line is compared against.
+  `serviceCsi` injects `R,<seq>,<pres>,<motion>,<rssi>,RUN|CAL` lines into
   `RadarLink` at 15 Hz (legacy wire format, now internal only).
+- **Calibration** (`startCalibration` / `finishCalibration`): at boot, after
+  joining a network (`enableCsi`), on `c` and on the phone's CAL button.
+  5 s settle (step away; also waits for 50 new frames) + 8 s collect (≥ 30
+  ticks that saw new frames). Ceiling = level + max(2σ, ln 1.5) from the
+  10th/30th percentiles of ln(var): motion only adds variance, so the low
+  side tolerates someone walking off for the first ~3 s (median/MAD broke
+  there in simulation). Without CSI frames it waits ("waiting for WiFi
+  traffic"). Progress in `gCalPct` (-1 = idle); screens, scope status bar and
+  phone show CALIBRATING + %. Serial logs the ceilings/σ when done.
+  Tunables still unvalidated on hardware: `kCsiFullScale` (20),
+  `kCalMinSpread` (0.40), settle/collect times.
 - **Spy-cam markers:** `sniffCallback` matches transmitter OUIs (ESP32, Wyze,
   Ring, Hikvision…) and shows them as amber camera icons.
 - **Displays (different content per screen, NOT a clone):**
@@ -70,14 +86,16 @@ Information (CSI). Realistic target: on-device **presence + motion**.
   Bottom @30 fps, top @~8 fps.
 - `include/radar_link.h` — line parser + state + 240-sample motion history.
   `injectLine()` is how `serviceCsi` feeds it. Its UART command senders
-  (`calibrate()`, `setThreshold()`) are no-ops in the CSI build.
+  (`calibrate()`, `setThreshold()`) are no-ops in the CSI build; there `c`
+  and the threshold act on-device (`requestCalibration()`, `gThreshold`).
 - `include/ext_panel.h` — external ILI9341 panel class.
 - `include/web_view.h` — dependency-free HTTP + SSE server on raw lwIP sockets.
-  Routes: `/`, `/ev`, `/cmd?k=dn|up|pal`. Max 5 sockets / 3 streams (oldest
+  Routes: `/`, `/ev`, `/cmd?k=dn|up|pal|cal`. Max 5 sockets / 3 streams (oldest
   evicted), idle preconnects recycled, streams stalled > 6 s dropped.
 - `web/index.html` — phone page, linked into flash via
   `board_build.embed_txtfiles` (symbol `_binary_web_index_html_start`).
-  SSE events: default frame `{"q":seq,"p":0|1,"m":motion‰,"r":rssi,"t":thr%}`,
+  SSE events: default frame `{"q":seq,"p":0|1,"m":motion‰,"r":rssi,"t":thr%}`
+  (+ `"c":progress%,"cw":0|1` while calibrating; `cw` = no CSI frames),
   `st` (1 Hz: ip, ssid, ch, bat, chg, palette, CSI fps, viewers, cams),
   `hist` (240 samples, 0..100, on connect).
 - `src/DC34.html` — unrelated standalone page ("Talking Sasquach // Field
@@ -85,6 +103,13 @@ Information (CSI). Realistic target: on-device **presence + motion**.
 
 ## Status
 ✅ On-device CSI presence/motion, dual-screen UI, spy-cam markers, WiFi picker.
+✅ Real threshold + calibration (2026-11-02): compiles (RAM 20.7 %, flash
+   32.5 %). `serviceCsi`/calibration code tested on Linux in a harness with
+   synthetic CSI frames (empty room, walking, small motion vs thr 20/95 %,
+   disturbed calibration, no traffic, 8 fps, WiFi drop). Phone CAL button /
+   CALIBRATING banner tested in headless Chromium. NOT tested on hardware:
+   real CSI noise may need `kCsiFullScale` / `kCalMinSpread` retuned (read
+   the `# CSI calibration done` serial line).
 ✅ Phone view (2026-11-02): compiles for ESP32-S3 (RAM 20.3 %, flash 32.4 %);
    `web_view.h` tested on Linux with a socket shim + Chromium (live stream,
    commands, reconnect, stalled/idle/excess/RST clients). Page tested in
@@ -98,8 +123,13 @@ Information (CSI). Realistic target: on-device **presence + motion**.
    the AP and its frames are still used → keep it still.
 
 ## Known issues (found, not fixed)
-- `c` (calibrate) does nothing in the CSI build, and `,` `/` threshold only
-  moves the graph line: detection uses fixed `kCsiThresh = 0.15`.
+- Phone page overflows horizontally on small landscape phones (667x375,
+  568x320): the 4-column `#stats` grid ("CONTACTS"/"THRESH" labels) is wider
+  than the panel. Pre-existing; 844x390 and portrait are fine.
+- CSI is taken from every transmitter on the channel; a change in the
+  traffic mix (a new device starts talking) can raise the variance without
+  motion. If false CONTACTs show up on hardware, a per-transmitter baseline
+  (or AP-only CSI) is the next fix.
 - `RADAR_FAKE=1` doesn't compile: `serviceFake()` uses `camBlips` before its
   declaration (pre-existing).
 - After a WiFi drop, `serviceCsi()` sets `wifiReady = false` and nothing
@@ -107,10 +137,10 @@ Information (CSI). Realistic target: on-device **presence + motion**.
 
 ## Next steps (priority order)
 1. **Hardware test of the phone view** (see ⚠️ above); check free heap.
-2. **Make threshold + calibration real in CSI mode:** use `gThreshold` instead
-   of `kCsiThresh`; `c` = reset baselines (`gCsiVar*`) for an empty-room
-   baseline, with a CALIBRATING state on screen and phone.
-3. **Auto-recover CSI after WiFi reconnects.**
+2. **Hardware test of calibration/threshold:** empty-room vs walking scores,
+   tune `kCsiFullScale` / `kCalMinSpread` from the serial ceilings/σ.
+3. **Auto-recover CSI after WiFi reconnects** (`enableCsi()` already starts
+   a fresh calibration).
 4. **Port sensor to ESP32-C5** (MonsterC5): better CSI PHY (Wi-Fi 6), but
    `wifi_csi_acquire_config_t` is different — missing fields like `lltf_en`,
    `sig_mode`, `secondary_channel`, `ant`.

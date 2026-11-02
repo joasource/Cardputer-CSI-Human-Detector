@@ -35,6 +35,16 @@ Both screens are running at the same time showing different things (not a clone,
 
 ---
 
+## Calibration and threshold
+
+The radar measures motion **relative to your empty room**, so it calibrates first:
+
+- At boot (and after picking a WiFi network) the screens show **CALIBRATING** with a progress bar for about 13 s: 5 s to step away, then 8 s of learning what the quiet room looks like. Keep still or leave the room while it runs. Press `c` (or **CAL** on the phone) to redo it any time, e.g. after moving the Cardputer.
+- If it sits at "waiting for WiFi traffic", there are no CSI frames on the channel yet; it finishes once something on the network talks.
+- After that, motion 0 % means "as quiet as the empty room". The **threshold** (`,` / `/`, or THR− / THR+ on the phone) is the line on the graph: anything above it is a contact, held for 10 s. The default 35 % is about 3x the empty room's noise; raise it if you get false contacts, lower it to catch smaller movements. The threshold is saved and survives reboots.
+
+---
+
 ## No external screen? Use your phone
 
 The Cardputer also serves the radar scope as a web page, so your phone can be the second screen. No app to install: it's just a page in the phone's browser.
@@ -43,7 +53,7 @@ The Cardputer also serves the radar scope as a web page, so your phone can be th
 2. After boot, the built-in screen shows a **QR code**. Scan it with the phone camera (or press `q` to bring it back).
 3. You can also type the IP shown in the title bar, e.g. `http://192.168.1.42/`, or try `http://radar.local/`.
 
-The phone draws the full scope itself (PPI sweep and the vaporwave 3D view, so tap the scope to switch) plus the motion graph, threshold buttons, palette switch, and an optional sonar sound. Only a few numbers per frame cross the WiFi (~15 updates/s over Server-Sent Events), so it stays smooth.
+The phone draws the full scope itself (PPI sweep and the vaporwave 3D view, so tap the scope to switch) plus the motion graph, threshold and calibrate buttons, palette switch, and an optional sonar sound. Only a few numbers per frame cross the WiFi (~15 updates/s over Server-Sent Events), so it stays smooth.
 
 If you don't have the external TFT at all, open the settings menu (`` ` ``) and turn **EXT PANEL** down to **OFF**. The Cardputer then stops rendering the top scope and frees its ~86 KB frame buffer.
 
@@ -79,9 +89,9 @@ pio run -e cardputer-radar-csi -t upload
 
 | Key | Action |
 |-----|--------|
-| `c` | Trigger calibration (empty-room baseline) |
-| `,` | Decrease detection threshold |
-| `/` | Increase detection threshold |
+| `c` | Calibrate: learn the empty room (~13 s, keep still or step away) |
+| `,` | Decrease detection threshold (5 % steps, saved) |
+| `/` | Increase detection threshold (5 % steps, saved) |
 | `.` | Switch the top scope between PPI and 3D view |
 | `q` | Show the QR code / URL for the phone view |
 | `` ` `` | Open settings menu |
@@ -112,9 +122,8 @@ pio run -e cardputer-radar-csi -t upload
 
 ## Roadmap
 
-1. Calibration wizard with on-screen progress indicator
-2. Dual-antenna bearing estimation toward directional blips on the radar scope
-3. Presence event log with optional SD card persistence
+1. Dual-antenna bearing estimation toward directional blips on the radar scope
+2. Presence event log with optional SD card persistence
 
 ---
 

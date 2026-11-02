@@ -35,13 +35,15 @@ html,body{margin:0;height:100%;background:#000;color:var(--ink);
   font-weight:700;letter-spacing:.06em;color:var(--b);background:#000019;transition:background .2s,box-shadow .2s}
 #banner.on{color:#ff64ff;background:#3c003c;border-color:var(--a);box-shadow:0 0 22px -6px var(--a)}
 #banner.off{color:var(--bad);border-color:#5a1020;background:#14000a}
+#banner.cal{color:#ff8c00;border-color:#ff8c00;
+  background:linear-gradient(90deg,#4a2600 var(--p,0%),#1a0d00 var(--p,0%))}
 #stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
 #stats div{background:var(--bar);border:1px solid #2c0042;border-radius:5px;padding:5px 4px;text-align:center;min-width:0}
 #stats span{display:block;font-size:10px;color:var(--dim);letter-spacing:.08em}
 #stats b{display:block;font-size:16px;color:var(--b);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #graphBox{position:relative;flex:1 1 auto;min-height:64px;border:1px solid var(--line);border-radius:4px;background:#000}
 #graph{position:absolute;inset:0;width:100%;height:100%;display:block}
-#btns{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
+#btns{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px}
 button{font:inherit;font-size:12px;font-weight:700;color:var(--ink);background:var(--bar);border:1px solid var(--line);
   border-radius:6px;padding:12px 0;letter-spacing:.04em;touch-action:manipulation}
 button:active{background:#3c003c}
@@ -76,6 +78,7 @@ button.on{color:#000;background:var(--b);border-color:var(--b)}
       <button id="bView" aria-label="Switch radar view">3D</button>
       <button data-k="dn" aria-label="Threshold down">THR&minus;</button>
       <button data-k="up" aria-label="Threshold up">THR+</button>
+      <button data-k="cal" aria-label="Calibrate: learn the empty room">CAL</button>
       <button data-k="pal" aria-label="Next color palette">COLOR</button>
       <button id="bSnd" aria-label="Sonar sound">SOUND</button>
     </div>
@@ -97,7 +100,7 @@ const PALS = [[220,0,200,0,220,220],[0,220,80,0,180,100],[255,180,0,220,140,0],
               [255,40,40,255,120,40],[40,120,255,0,200,255]];
 
 // ---------------------------------------------------------------- state ----
-const S = { seq: 0, pres: false, mot: 0, rssi: 0, thr: 0.35, last: -1e9,
+const S = { seq: 0, pres: false, mot: 0, rssi: 0, thr: 0.35, last: -1e9, cal: -1, calWait: false,
             ip: '', ss: '', ch: 0, bat: -1, chg: 0, csi: 0, n: 0, cams: [] };
 const HN = 240;                                   // RadarLink::kHistory
 const hist = new Float32Array(HN);
@@ -107,6 +110,8 @@ const linkOk = now => now - S.last < 750;         // radar.stale(750) on the dev
 function onFrame(j) {
   S.seq = j.q; S.pres = !!j.p; S.mot = (j.m || 0) / 1000; S.rssi = j.r | 0;
   if (j.t) S.thr = j.t / 100;
+  S.cal = 'c' in j ? j.c | 0 : -1;               // calibration progress, -1 = not calibrating
+  S.calWait = !!j.cw;                             // calibrating but no CSI frames arriving
   S.last = performance.now();
   hist[hHead] = S.mot; hHead = (hHead + 1) % HN;
   uiDirty = true;
@@ -143,6 +148,7 @@ function cmd(k) {
   if (DEMO) {
     if (k === 'dn') S.thr = clamp(Math.round((S.thr - 0.05) * 20) / 20, 0.05, 0.95);
     if (k === 'up') S.thr = clamp(Math.round((S.thr + 0.05) * 20) / 20, 0.05, 0.95);
+    if (k === 'cal') demoCal = performance.now();
     if (k === 'pal') { demoPal = (demoPal + 1) % PALS.length; demoStatus(); }
     uiDirty = true;
     return;
@@ -151,6 +157,7 @@ function cmd(k) {
 }
 
 // Offline preview: same generator as serviceFake() on the Cardputer.
+let demoCal = 0;                                  // CAL pressed: fake a 13 s calibration
 function demoStatus() {
   onStatus({ ip: 'demo', ss: 'offline preview', ch: 6, bat: 76, chg: 0, pa: PALS[demoPal],
              csi: 0, n: 1, cam: [['Ring', -65, 2600, 407]] });
@@ -159,6 +166,11 @@ function startDemo() {
   let seq = 0, phase = 0, person = false, until = 0;
   setInterval(() => {
     const now = performance.now();
+    if (demoCal) {
+      const pct = Math.floor((now - demoCal) / 130);
+      if (pct < 100) { onFrame({ q: ++seq, p: 0, m: 0, r: -45 - rnd(0, 25), t: Math.round(S.thr * 100), c: pct, cw: 0 }); return; }
+      demoCal = 0;
+    }
     if (now > until) { person = !person; until = now + (person ? rnd(4000, 9000) : rnd(3000, 7000)); }
     phase += 0.2;
     const base = person ? 0.25 : 0.02;
@@ -338,10 +350,13 @@ function drawChrome(now, title, present, contacts) {
   text(mode, W - tw(mode) - 4, 2, DEMO ? rgb(255, 170, 0) : ok ? rgb(0, 210, 80) : rgb(255, 40, 40));
   // status bar
   fill(0, H - 14, W, 14, cBar); hline(0, H - 14, W, cBorder);
-  const ct = present ? '>>CONTACT<<' : ' scanning.. ';
-  text(ct, 14, H - 12, present ? (blink ? rgb(255, 60, 255) : rgb(110, 0, 100)) : rgb(55, 0, 70));
-  const mid = present ? 'BRG:' + String(Math.round(lastBrg)).padStart(3, '0') : 'T:' + Math.round(S.thr * 100) + '%';
-  text(mid, (W - tw(mid)) / 2, H - 12, present ? rgb(255, 140, 60) : rgb(100, 0, 110));
+  const cal = ok && S.cal >= 0;
+  const ct = cal ? 'CALIBRATING' : present ? '>>CONTACT<<' : ' scanning.. ';
+  text(ct, 14, H - 12, cal ? (blink ? rgb(255, 140, 0) : rgb(120, 60, 0))
+                     : present ? (blink ? rgb(255, 60, 255) : rgb(110, 0, 100)) : rgb(55, 0, 70));
+  const mid = cal ? 'CAL ' + S.cal + '%'
+            : present ? 'BRG:' + String(Math.round(lastBrg)).padStart(3, '0') : 'T:' + Math.round(S.thr * 100) + '%';
+  text(mid, (W - tw(mid)) / 2, H - 12, cal ? rgb(255, 140, 0) : present ? rgb(255, 140, 60) : rgb(100, 0, 110));
   const st = (contacts >= 0 ? 'C:' + contacts + ' ' : '') + 'M:' + Math.round(S.mot * 100) + '% ' + S.rssi + 'dBm';
   text(st, W - tw(st) - 4, H - 12, rgb(...palB));
   // frame + corners
@@ -624,10 +639,21 @@ function draw3D(now) {
 // --------------------------------------------------------- bottom panel ----
 const gcv = $('graph'), gctx = gcv.getContext('2d');
 let gK = 1, uiDirty = true;
-function drawGraph() {
+function drawGraph(cal) {
   const w = gcv.width, h = gcv.height;
   if (!w || !h) return;
   gctx.fillStyle = '#000'; gctx.fillRect(0, 0, w, h);
+  if (cal) {                                      // calibrating: instructions instead of bars
+    gctx.textAlign = 'center'; gctx.textBaseline = 'middle';
+    gctx.font = `bold ${12 * gK}px ui-monospace,Menlo,Consolas,monospace`;
+    gctx.fillStyle = S.calWait ? 'rgb(255,140,0)' : rgb(...palB);
+    gctx.fillText(S.calWait ? 'waiting for WiFi traffic' : 'keep still or step away', w / 2, h / 2 - 8 * gK);
+    gctx.font = `${10 * gK}px ui-monospace,Menlo,Consolas,monospace`;
+    gctx.fillStyle = 'rgb(140,140,140)';
+    gctx.fillText(S.calWait ? 'no CSI frames yet' : 'learning the empty room', w / 2, h / 2 + 8 * gK);
+    gctx.textAlign = 'start'; gctx.textBaseline = 'alphabetic';
+    return;
+  }
   const pad = 2 * gK, ih = h - 2 * pad, bw = w / HN;
   for (let i = 0; i < HN; i++) {
     const v = hist[(hHead + i) % HN];
@@ -648,10 +674,12 @@ function drawGraph() {
 }
 const setText = (el, s) => { if (el.textContent !== s) el.textContent = s; };
 function updatePanel(now) {
-  const ok = linkOk(now) , present = ok && S.pres;
+  const ok = linkOk(now) , present = ok && S.pres, cal = ok && S.cal >= 0;
   const banner = $('banner');
-  banner.className = !ok ? 'off' : present ? 'on' : '';
-  setText(banner, !ok ? (S.last < 0 ? 'CONNECTING' : 'NO LINK') : present ? '>> CONTACT <<' : '~~ CLEAR ~~');
+  banner.className = !ok ? 'off' : cal ? 'cal' : present ? 'on' : '';
+  banner.style.setProperty('--p', (cal ? S.cal : 0) + '%');
+  setText(banner, !ok ? (S.last < 0 ? 'CONNECTING' : 'NO LINK')
+                      : cal ? 'CALIBRATING ' + S.cal + '%' : present ? '>> CONTACT <<' : '~~ CLEAR ~~');
   setText($('vMot'), ok ? Math.round(S.mot * 100) + '%' : '--');
   setText($('vRssi'), ok ? String(S.rssi) : '--');
   setText($('vThr'), Math.round(S.thr * 100) + '%');
@@ -662,7 +690,7 @@ function updatePanel(now) {
   const ssid = S.ss ? S.ss + (S.ch ? ' ch' + S.ch : '') : '';
   setText($('info'), [S.ip, ssid, DEMO ? '' : 'CSI ' + S.csi + '/s',
                       S.n ? S.n + (S.n === 1 ? ' viewer' : ' viewers') : ''].filter(Boolean).join(' · '));
-  drawGraph();
+  drawGraph(cal);
 }
 
 // ---------------------------------------------------------------- loop -----
