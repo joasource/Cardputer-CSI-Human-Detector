@@ -631,8 +631,9 @@ static bool runWifiPicker() {
             canvas.fillSprite(cBg);
             char h[30]; snprintf(h, sizeof(h), "SENHA: %.18s", newSsid); hdr(h);
             int pl = (int)strlen(newPass);
-            char stars[65]; memset(stars, '*', pl); stars[pl] = '\0';
-            char field[70]; snprintf(field, sizeof(field), "> %s_", stars);
+            // password shown in clear; if longer than the screen, show the tail
+            const char* shown = newPass + (pl > 34 ? pl - 34 : 0);
+            char field[70]; snprintf(field, sizeof(field), "> %s_", shown);
             canvas.setTextSize(1); canvas.setTextColor(TFT_WHITE, cBg);
             canvas.drawString(field, 8, H / 2 - 6);
             ftr("digite  /:ok  `:cancelar"); canvas.pushSprite(0, 0);
