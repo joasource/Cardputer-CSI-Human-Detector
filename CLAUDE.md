@@ -1,7 +1,24 @@
 # CLAUDE.md — WiFi-CSI Radar
 
-> Context handoff for continuing this project in Claude Code / VS Code.
+> Context handoff for continuing this project in Claude Code (local CLI with
+> the Cardputer on USB, or a cloud session) / VS Code.
 > Standalone project — a handheld WiFi-CSI people sensor with a dual-screen UI.
+
+## Handoff — where things stand (2026-11-02)
+- The user writes in **Portuguese (pt-BR)**; answer in Portuguese. Keep code,
+  commits and this file in English.
+- `main` @ `7ed3bc9` = PR #1 merged: phone view + real threshold/calibration.
+  Everything below describes `main`. Start new work on a branch off `main`.
+- **Nothing in PR #1 has run on hardware yet.** It compiled for ESP32-S3 and
+  was tested on Linux harnesses + headless Chromium only. A local session
+  with the Cardputer plugged in can finally flash it and read the serial
+  log: do the **Hardware test checklist** below before new features.
+- **No GitHub release exists yet.** Tag `v0.2.0` was NOT created (the cloud
+  session's git proxy only allows pushing its own branch; tag push got 403).
+  To publish the web-flasher `.bin`, from a local clone:
+  `git fetch origin` → `git tag v0.2.0 origin/main` →
+  `git push origin v0.2.0`, then check the Actions tab (~5 min) for
+  `cardputer-csi-v0.2.0.bin` on the Releases page.
 
 ## Goal
 A **handheld device that senses people through WiFi** using Channel State
@@ -53,9 +70,32 @@ Information (CSI). Realistic target: on-device **presence + motion**.
   `main.cpp` have no build env.
 
 ## Build / run
-- `pio run -e cardputer-radar-csi -t upload` — the only env.
+- `cardputer-radar-csi` is the only env (and the default):
+  - build: `pio run -e cardputer-radar-csi`
+  - flash: `pio run -e cardputer-radar-csi -t upload --upload-port <PORT>`
+    (find the port with `pio device list`; the native USB of the S3 shows up
+    as a USB-CDC/JTAG device, no driver needed on Windows 10+)
+  - serial: `pio device monitor -b 115200`
+- **Local CLI gotchas:**
+  - PlatformIO installed only through the VS Code extension is not on PATH.
+    On Windows use `& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"`
+    (PowerShell), on Linux/macOS `~/.platformio/penv/bin/pio`, or
+    `pip install platformio`. First build downloads the toolchain (minutes).
+  - `pio device monitor` never exits: run it as a background command (or with
+    a timeout) and read its output. It holds the port, so **stop the monitor
+    before uploading** or the upload fails with "port busy".
+  - If upload can't connect: hold **G0** while plugging the USB-C cable
+    (download mode), upload, then unplug/replug to run.
+  - The first boot after a fresh flash opens the on-device WiFi picker and
+    waits for the keyboard: the user has to pick the network on the device.
+- Serial lines worth grepping (`#` prefix = log, not data):
+  `# CSI WiFi: <ssid>  IP:<ip>`, `# CSI active`,
+  `# Phone view: http://<ip>/  (http://radar.local/)`,
+  `# CSI calibration: keep the room still`,
+  `# CSI calibration done: N samples, amp ceil X (sigma Y), pha ceil X (sigma Y)`.
 - Release: pushing a `v*` tag runs `.github/workflows/release.yml`, which
-  builds and merges a flash-at-0x0 `.bin` for the web flasher.
+  builds and merges a flash-at-0x0 `.bin` for the web flasher
+  (esptool.spacehuhn.com, address `0x0`).
 - Phone page preview without hardware: open `web/index.html` from disk
   (or add `?demo`) — runs on fake data.
 - Cloud sessions: the PlatformIO registry (`api.registry.platformio.org`,
@@ -65,6 +105,7 @@ Information (CSI). Realistic target: on-device **presence + motion**.
   esptool v4.9.0, SCons 4.11.1 and the M5 libs fetched from GitHub/PyPI into
   `~/.platformio`, plus a scratch ini that `extends` this env with
   `symlink://` lib_deps. Or allow those hosts in the environment settings.
+  Cloud sessions can push only their assigned branch (no tags, no `main`).
 
 ## Hard constraints (don't regress these)
 - Build sets `ARDUINO_USB_CDC_ON_BOOT=1` → **`Serial` is USB-C**. Any sensor
@@ -134,10 +175,37 @@ Information (CSI). Realistic target: on-device **presence + motion**.
   declaration (pre-existing).
 - After a WiFi drop, `serviceCsi()` sets `wifiReady = false` and nothing
   re-enables CSI until the WiFi picker runs or the device reboots.
+- No free-heap logging exists anywhere in the firmware (needed for the
+  hardware test, see checklist).
+- Stale leftovers from the original setup: `.claude/settings.json` allows
+  only two PowerShell `pio.exe` commands for envs that no longer exist
+  (`sensor-s3`, `cardputer-radar-wifi`) under another machine's path; the
+  `platformio.ini` header still mentions a `credentials.ini` that is no
+  longer used (creds live in NVS). Safe to clean up.
+
+## Hardware test checklist (do first, needs the device + a phone)
+1. Flash `main`, open the monitor, pick the WiFi on the device (2.4 GHz).
+   Expect `# CSI WiFi`, `# CSI active`, `# Phone view: http://<ip>/`.
+2. **Calibration:** leave the room during the ~13 s CALIBRATING. Record the
+   `# CSI calibration done` line (ceilings + σ). Repeat 2–3 times (`c`) and
+   check the ceilings are stable.
+3. **Threshold:** empty room → motion stays well under 35 % (no CONTACT);
+   walking 2–5 m away → clearly above. If empty-room noise reaches the line
+   or walking barely crosses it, tune `kCsiFullScale` (20) /
+   `kCalMinSpread` (0.40) in `src/main.cpp` from the recorded σ.
+4. **Phone view:** scan the boot QR (Android Chrome + iOS Safari if
+   available), try the IP and `http://radar.local/`, press THR−/THR+/CAL/
+   palette on the phone and confirm the Cardputer follows; footer shows the
+   phone count; reload/lock the phone and check it reconnects.
+5. **Heap:** add a temporary 1 Hz log of `ESP.getFreeHeap()` /
+   `ESP.getMinFreeHeap()` (e.g. next to the `st` event in `serviceWeb()`),
+   run with EXT PANEL ON and 3 phones connected, note the minimum, then
+   remove it or keep it behind a flag.
+6. Write the results into **Status** below (replace the ⚠️ lines).
 
 ## Next steps (priority order)
-1. **Hardware test of the phone view** (see ⚠️ above); check free heap.
-2. **Hardware test of calibration/threshold:** empty-room vs walking scores,
+1. **Hardware test of the phone view** (checklist steps 1, 4, 5).
+2. **Hardware test of calibration/threshold** (checklist steps 2, 3):
    tune `kCsiFullScale` / `kCalMinSpread` from the serial ceilings/σ.
 3. **Auto-recover CSI after WiFi reconnects** (`enableCsi()` already starts
    a fresh calibration).
@@ -152,5 +220,6 @@ Information (CSI). Realistic target: on-device **presence + motion**.
 - C5 (best CSI): MonsterC5, AWOK Dual Touch (2x each), Marauder v8.
 - C3: BLEShark Nanos (many; mesh-capable).
 - S3: Cardputer ADV (console, COM18); S3 DevKit (former sensor, COM44).
+  COM numbers are from the original dev machine; check `pio device list`.
 - Classic ESP32: Cheap Yellow Displays, HaleHound (CYD-based).
 - Not ESP32: Cardputer Zero (Raspberry Pi CM Zero), Hackberry Pi, HackRF/PortaPack.
