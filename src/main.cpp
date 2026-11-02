@@ -8,6 +8,11 @@
 //   RADAR_FAKE = 0          : live frames from the Monster C5 over Serial1/Grove.
 //
 // Keys:  c = calibrate    , = threshold-    / = threshold+    ` = settings menu
+//        q = phone view QR code (CSI build)
+//
+// Phone view (CSI build): the Cardputer serves web/index.html on port 80 and
+// streams live frames over Server-Sent Events, so a phone on the same WiFi
+// can show the radar scope instead of (or as well as) the external TFT.
 // =============================================================================
 #include <M5Cardputer.h>
 #include <M5Unified.h>
@@ -44,28 +49,57 @@ static char     wifiIP[16] = "---";
 // ── On-device CSI sensing ─────────────────────────────────────────────────────
 #if defined(RADAR_CSI)
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include "esp_wifi.h"
+#include "web_view.h"
 static bool  wifiReady = false;
 static char  wifiIP[16] = "---";
+
+static WebView  web;                 // phone view: HTTP + SSE on port 80
+static bool     gQrShow  = false;    // QR card on the built-in screen
+static uint32_t gQrSeen  = 0;        // web.sseConnects() when the card opened
 
 static const int  kCsiWindow  = 50;
 static float      gCsiAmpBuf[kCsiWindow];
 static float      gCsiPhaBuf[kCsiWindow];   // mean sin(phase) per frame
 static int        gCsiAmpIdx    = 0;
 static int        gCsiAmpFilled = 0;
-static volatile float    gCsiMotion  = 0.0f;
+// Latest window variances, written by csiCallback (WiFi task) and turned into
+// a motion score by serviceCsi() against the calibrated empty-room baseline.
+static volatile float    gCsiAmpVar  = 0.0f;
+static volatile float    gCsiPhaVar  = 0.0f;
 static volatile int8_t   gCsiRssi    = -80;
 static volatile uint32_t gCsiCount   = 0;
-static float      gCsiVarMax   = 0.001f;
-static float      gCsiVarMin   = 0.0f;
-static float      gCsiPhaVarMax = 0.001f;
-static float      gCsiPhaVarMin = 0.0f;
-static const float kCsiThresh  = 0.15f;
 
 static void IRAM_ATTR promiscuousRxCb(void*, wifi_promiscuous_pkt_type_t) {}
 
+// Stations that send unicast traffic to us: in practice, the phone showing
+// the web radar. Promiscuous mode also hears their uplink frames, and a phone
+// moving in someone's hand would read as motion, so CSI from those
+// transmitters is skipped. Frames the AP sends us (including the ones that
+// relay the phone's traffic) are still used. Both WiFi callbacks run on the
+// WiFi task, so these tables need no locking.
+static uint8_t gMyMac[6]     = {};
+static uint8_t gPeerMac[4][6];
+static uint8_t gPeerCount    = 0;
+static uint8_t gPeerNext     = 0;
+
+static bool IRAM_ATTR isPeerMac(const uint8_t* m) {
+    for (int i = 0; i < gPeerCount; i++)
+        if (memcmp(gPeerMac[i], m, 6) == 0) return true;
+    return false;
+}
+
+static void IRAM_ATTR learnPeerMac(const uint8_t* m) {
+    if (isPeerMac(m)) return;
+    memcpy(gPeerMac[gPeerNext], m, 6);
+    gPeerNext = (gPeerNext + 1) % 4;
+    if (gPeerCount < 4) gPeerCount++;
+}
+
 static void IRAM_ATTR csiCallback(void*, wifi_csi_info_t* info) {
     if (!info || !info->buf || info->len < 4) return;
+    if (isPeerMac(info->mac)) return;
     gCsiCount++;
     int8_t* b   = info->buf;
     int  nPairs = info->len / 2;
@@ -107,28 +141,8 @@ static void IRAM_ATTR csiCallback(void*, wifi_csi_info_t* info) {
     for (int i = 0; i < n; i++) { float d = gCsiPhaBuf[i] - pmean; pvar += d*d; }
     pvar /= (float)n;
 
-    // Normalize amplitude: asymmetric-EMA floor + running max → [0,1]
-    if (gCsiVarMin  < 0.0001f) gCsiVarMin  = var;
-    else gCsiVarMin  += (var  - gCsiVarMin)  * ((var  < gCsiVarMin)  ? 0.1f  : 0.002f);
-    if (var  > gCsiVarMax)  gCsiVarMax  = var;
-    else gCsiVarMax  += (var  - gCsiVarMax)  * 0.005f;
-    float range = gCsiVarMax - gCsiVarMin;
-    float ampMotion = (range > 0.0001f) ? ((var - gCsiVarMin) / range) : 0.0f;
-    if (ampMotion < 0.0f) ampMotion = 0.0f;
-    if (ampMotion > 1.0f) ampMotion = 1.0f;
-
-    // Normalize phase variance: same floor/max approach
-    if (gCsiPhaVarMin < 0.0001f) gCsiPhaVarMin = pvar;
-    else gCsiPhaVarMin += (pvar - gCsiPhaVarMin) * ((pvar < gCsiPhaVarMin) ? 0.1f : 0.002f);
-    if (pvar > gCsiPhaVarMax) gCsiPhaVarMax = pvar;
-    else gCsiPhaVarMax += (pvar - gCsiPhaVarMax) * 0.005f;
-    float prange = gCsiPhaVarMax - gCsiPhaVarMin;
-    float phaMotion = (prange > 0.0001f) ? ((pvar - gCsiPhaVarMin) / prange) : 0.0f;
-    if (phaMotion < 0.0f) phaMotion = 0.0f;
-    if (phaMotion > 1.0f) phaMotion = 1.0f;
-
-    // Blend: 60% amplitude, 40% phase (ruview weights: 40%/30%/30%)
-    gCsiMotion = 0.6f * ampMotion + 0.4f * phaMotion;
+    gCsiAmpVar = var;
+    gCsiPhaVar = pvar;
     gCsiRssi   = info->rx_ctrl.rssi;
 }
 #endif
@@ -139,7 +153,11 @@ static M5Canvas        canvas(&M5Cardputer.Display);   // bottom (built-in) buff
 static LGFX_ExtILI9341 extPanel;                       // external 2.8" ILI9341
 static M5Canvas        topCanvas(&extPanel);           // top render buffer (240x180)
 static bool            extReady   = false;
-static float           gThreshold = 0.35f;
+static float           gThreshold = 0.35f;      // presence when motion > this (NVS "thr")
+static int             gCalPct     = -1;        // CSI calibration progress 0..99, -1 = not calibrating
+static bool            gCalWaiting = false;     // calibrating, but no CSI frames are arriving
+static bool            gSavePending = false;    // deferred saveSettings() after threshold steps
+static uint32_t        gSaveAt      = 0;
 static const float     EXT_ZOOM   = 320.0f / 240.0f;   // 240x180 * 1.333 = 320x240, fills panel
 
 // ── Color palettes & runtime settings ─────────────────────────────────────────
@@ -196,12 +214,26 @@ static void applyExtBrightness() {
     }
 }
 
+// The 240x180 top canvas is ~86 KB of the no-PSRAM heap, so it only exists
+// while the external panel is enabled (EXT PANEL above OFF).
+static void setExtPanelOn(bool on) {
+    if (on && !extReady) {
+        topCanvas.setColorDepth(16);
+        extReady = (topCanvas.createSprite(240, 180) != nullptr);  // 240x180 * EXT_ZOOM = 320x240, fills panel
+    } else if (!on && extReady) {
+        topCanvas.deleteSprite();
+        extReady = false;
+        extPanel.fillScreen(TFT_BLACK);
+    }
+}
+
 static void saveSettings() {
     Preferences prefs;
     prefs.begin("radar", false);
     prefs.putUChar("palette",   gColorIdx);
     prefs.putUChar("bright",    gBright);
     prefs.putUChar("extbright", gExtBright);
+    prefs.putUChar("thr",       (uint8_t)lroundf(gThreshold * 100.0f));
     prefs.end();
 }
 
@@ -211,10 +243,14 @@ static void loadSettings() {
     gColorIdx  = prefs.getUChar("palette",   0);
     gBright    = prefs.getUChar("bright",   80);
     gExtBright = prefs.getUChar("extbright",80);
+    uint8_t thr = prefs.getUChar("thr",     35);
     prefs.end();
+    if (thr < 5 || thr > 95) thr = 35;
+    gThreshold = roundf(thr / 5.0f) * 0.05f;   // same 5 % grid as nudgeThreshold()
     if (gColorIdx >= kNumPalettes) gColorIdx = 0;
     if (gBright    < 10 || gBright    > 100) gBright    = 80;
-    if (gExtBright < 10 || gExtBright > 100) gExtBright = 80;
+    // 0 = external panel off (no TFT attached, e.g. using the phone view)
+    if (gExtBright != 0 && (gExtBright < 10 || gExtBright > 100)) gExtBright = 80;
     applyPalette(gColorIdx);
 }
 
@@ -347,12 +383,116 @@ static void saveWifiCreds(const char* ssid, const char* pass) {
 
 static void IRAM_ATTR sniffCallback(void*, wifi_promiscuous_pkt_type_t);  // defined later
 
+// ── Motion score + empty-room calibration ─────────────────────────────────────
+// csiCallback publishes the window variance of mean amplitude and of mean
+// sin(phase). serviceCsi() scores each one against a baseline learned while the
+// room is empty/still:
+//
+//   ceiling = empty-room level of ln(var) + max(2 sigma, kCalMinSpread)
+//   score   = ln(var) - ceiling, divided by ln(kCsiFullScale), clamped to 0..1
+//   motion  = max(amplitude score, phase score)
+//
+// So 0 % = no busier than the empty room, and the threshold is a fixed ratio
+// over the empty-room ceiling: 35 % = 2.9x, 50 % = 4.5x, 100 % = 20x.
+//
+// Calibration runs at boot, after joining a network, on `c` and on the phone's
+// CAL button: kCalSettleMs to step away (and flush the 50-frame window), then
+// kCalCollectMs of samples. It only finishes once enough CSI frames arrived.
+static const float    kCsiFullScale   = 20.0f;
+static const float    kCalMinSpread   = 0.40f;   // ln(1.5): a 50-sample variance wobbles this much anyway
+static const float    kCsiVarEps      = 1e-6f;
+static const uint32_t kCalSettleMs    = 5000;
+static const uint32_t kCalCollectMs   = 8000;
+static const int      kCalMinSamples  = 30;      // 15 Hz ticks that saw new CSI frames
+static const int      kCalMaxSamples  = 160;
+
+struct CsiCal {
+    bool     active    = false;
+    bool     valid     = false;     // a baseline exists
+    uint32_t startMs   = 0;
+    uint32_t startCnt  = 0;         // gCsiCount when calibration started
+    uint32_t collectMs = 0;         // 0 = still settling
+    uint32_t lastCnt   = 0;
+    uint32_t lastFrameMs = 0;
+    int      n         = 0;
+    float    ampCeil   = 0.0f;      // ln-variance ceilings
+    float    phaCeil   = 0.0f;
+};
+static CsiCal gCal;
+static float  gCalAmp[kCalMaxSamples];
+static float  gCalPha[kCalMaxSamples];
+
+static void startCalibration() {
+    const uint32_t now = millis();
+    gCal.active      = true;
+    gCal.startMs     = now;
+    gCal.startCnt    = gCsiCount;
+    gCal.collectMs   = 0;
+    gCal.lastFrameMs = now;
+    gCal.n           = 0;
+    gCalPct          = 0;
+    gCalWaiting      = false;
+    Serial.println("# CSI calibration: keep the room still");
+}
+
+// ln-variance ceiling of one channel (sorts v). Motion only ever adds
+// variance, so the empty room is read from the low side of the samples: the
+// 10th/30th percentiles don't move when someone is still walking off for the
+// first second or three of the collection (a median/MAD fit broke at ~3 s in
+// simulation). For a Gaussian, p30 - p10 = 0.757 sigma and p30 = mean - 0.524 sigma.
+static float calCeiling(float* v, int n, float* sigmaOut) {
+    for (int i = 1; i < n; i++) {               // insertion sort, n <= 160
+        float x = v[i];
+        int j = i - 1;
+        while (j >= 0 && v[j] > x) { v[j + 1] = v[j]; j--; }
+        v[j + 1] = x;
+    }
+    const float p10   = v[(int)lroundf(0.10f * (n - 1))];
+    const float p30   = v[(int)lroundf(0.30f * (n - 1))];
+    const float sigma = (p30 - p10) / 0.757f;
+    *sigmaOut = sigma;
+    return p30 + 0.524f * sigma + fmaxf(2.0f * sigma, kCalMinSpread);
+}
+
+static void finishCalibration() {
+    float sa, sp;
+    gCal.ampCeil = calCeiling(gCalAmp, gCal.n, &sa);
+    gCal.phaCeil = calCeiling(gCalPha, gCal.n, &sp);
+    gCal.valid   = true;
+    gCal.active  = false;
+    gCalPct      = -1;
+    gCalWaiting  = false;
+    Serial.printf("# CSI calibration done: %d samples, amp ceil %.2f (sigma %.2f), "
+                  "pha ceil %.2f (sigma %.2f)\n", gCal.n, gCal.ampCeil, sa, gCal.phaCeil, sp);
+}
+
+static int calProgress(uint32_t now) {
+    const float settle = gCal.collectMs ? 1.0f
+                       : fminf(0.95f, (float)(now - gCal.startMs) / (float)kCalSettleMs);
+    float collect = 0.0f;
+    if (gCal.collectMs) {
+        collect = fminf((float)(now - gCal.collectMs) / (float)kCalCollectMs,
+                        (float)gCal.n / (float)kCalMinSamples);
+        if (collect > 1.0f) collect = 1.0f;
+    }
+    int pct = (int)(100.0f * (settle * kCalSettleMs + collect * kCalCollectMs)
+                    / (float)(kCalSettleMs + kCalCollectMs));
+    return pct > 99 ? 99 : pct;
+}
+
+// Score of one channel against its ceiling, 0..1.
+static float csiScore(float lnVar, float ceil) {
+    float v = (lnVar - ceil) / logf(kCsiFullScale);
+    return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+}
+
 static void enableCsi() {
     gCsiAmpIdx = 0; gCsiAmpFilled = 0;
-    gCsiVarMax = 0.001f; gCsiVarMin = 0.0f;
-    gCsiPhaVarMax = 0.001f; gCsiPhaVarMin = 0.0f;
+    gCsiAmpVar = 0.0f; gCsiPhaVar = 0.0f;
     memset(gCsiAmpBuf, 0, sizeof(gCsiAmpBuf));
     memset(gCsiPhaBuf, 0, sizeof(gCsiPhaBuf));
+    startCalibration();             // new network / channel: learn this room
+    esp_wifi_get_mac(WIFI_IF_STA, gMyMac);
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_promiscuous_rx_cb(promiscuousRxCb);
     wifi_csi_config_t cfg = {};
@@ -571,11 +711,10 @@ static void initCsi() {
 }
 
 static void serviceCsi() {
-    static uint32_t seq        = 0;
-    static uint32_t last       = 0;
-    static int      holdCnt    = 0;
-    static float    heldMotion = 0.0f;
-    const  int      kHold      = 150;   // 10 s at 15 Hz
+    static uint32_t seq     = 0;
+    static uint32_t last    = 0;
+    static int      holdCnt = 0;
+    const  int      kHold   = 150;   // 10 s at 15 Hz
 
     uint32_t now = millis();
     if (now - last < 66) return;
@@ -583,38 +722,59 @@ static void serviceCsi() {
 
     if (!wifiReady || WiFi.status() != WL_CONNECTED) {
         if (wifiReady) {
-            // WiFi just dropped — stop CSI and clear frozen state
-            wifiReady  = false;
-            holdCnt    = 0;
-            heldMotion = 0.0f;
+            // WiFi just dropped — stop CSI and clear frozen state. A calibration
+            // in progress is dropped; enableCsi() starts a new one on reconnect.
+            wifiReady   = false;
+            holdCnt     = 0;
+            gCal.active = false;
+            gCalPct     = -1;
+            gCalWaiting = false;
             esp_wifi_set_csi(false);
             esp_wifi_set_promiscuous(false);
-            gCsiMotion = 0.0f;
         }
         return;  // no frames injected → radar goes stale → NO LINK shown
     }
 
-    // Hold/coast logic at known 15 Hz rate (CSI callback rate varies with traffic).
-    // Once motion is detected, presence coasts for ~10 s so a still person stays
-    // on the scope. Motion decays from its peak toward 10% so the blip fades
-    // gracefully rather than snapping off.
-    float m = gCsiMotion;
-    bool present;
-    if (m > kCsiThresh) {
-        holdCnt    = kHold;
-        heldMotion = m;
-        present    = true;
-    } else if (holdCnt > 0) {
-        holdCnt--;
-        float fade = (float)holdCnt / kHold;
-        m       = heldMotion * (0.10f + 0.90f * fade);
-        present = true;
-    } else {
-        present = false;
-        m       = 0.0f;
+    const uint32_t cnt   = gCsiCount;
+    const bool     fresh = (cnt != gCal.lastCnt);   // new CSI frames since last tick
+    if (fresh) { gCal.lastCnt = cnt; gCal.lastFrameMs = now; }
+    const float lnAmp = logf(gCsiAmpVar + kCsiVarEps);
+    const float lnPha = logf(gCsiPhaVar + kCsiVarEps);
+    char line[48];
+
+    if (!gCal.active && !gCal.valid) startCalibration();
+    if (gCal.active) {
+        if (!gCal.collectMs) {
+            // Settle: time to step away, and a window refilled with new frames.
+            if (now - gCal.startMs >= kCalSettleMs && cnt - gCal.startCnt >= (uint32_t)kCsiWindow)
+                gCal.collectMs = now;
+        } else if (fresh && gCal.n < kCalMaxSamples) {
+            gCalAmp[gCal.n] = lnAmp;
+            gCalPha[gCal.n] = lnPha;
+            gCal.n++;
+        }
+        if (!(gCal.collectMs && now - gCal.collectMs >= kCalCollectMs && gCal.n >= kCalMinSamples)) {
+            gCalPct     = calProgress(now);
+            gCalWaiting = (now - gCal.lastFrameMs > 1500);
+            holdCnt     = 0;
+            snprintf(line, sizeof(line), "R,%lu,0,0.000,%d,CAL",
+                     (unsigned long)(++seq), (int)gCsiRssi);
+            radar.injectLine(line);
+            return;
+        }
+        finishCalibration();
     }
 
-    char line[48];
+    // Motion = how far the variance sits above the empty-room ceiling. Presence
+    // when it crosses the user's threshold, then held for ~10 s so a person who
+    // stops moving stays on the scope. The reported motion is the raw score, so
+    // the graph shows exactly what the threshold line is compared against.
+    float m = fmaxf(csiScore(lnAmp, gCal.ampCeil), csiScore(lnPha, gCal.phaCeil));
+    bool present;
+    if (m > gThreshold)    { holdCnt = kHold; present = true; }
+    else if (holdCnt > 0)  { holdCnt--;       present = true; }
+    else                   present = false;
+
     snprintf(line, sizeof(line), "R,%lu,%d,%.3f,%d,RUN",
              (unsigned long)(++seq), (int)present, m, (int)gCsiRssi);
     radar.injectLine(line);
@@ -634,9 +794,16 @@ static void menuAdjust(int dir) {
             gBright = (uint8_t)constrain((int)gBright + (dir > 0 ? 10 : -10), 10, 100);
             M5Cardputer.Display.setBrightness((uint8_t)((uint32_t)gBright * 255 / 100));
             break;
-        case 2:
-            gExtBright = (uint8_t)constrain((int)gExtBright + (dir > 0 ? 10 : -10), 10, 100);
+        case 2: {
+            // 10..100 %, and one step below 10 turns the panel OFF: the top
+            // scope is not rendered or pushed over SPI at all (no TFT fitted).
+            int v = (int)gExtBright + (dir > 0 ? 10 : -10);
+            if (v < 10) v = (dir > 0) ? 10 : 0;
+            if (v > 100) v = 100;
+            gExtBright = (uint8_t)v;
+            setExtPanelOn(v > 0);
             break;
+        }
 #if defined(RADAR_CSI)
         case 3:
             gMenuOpen = false;
@@ -686,7 +853,10 @@ static void drawMenu() {
         switch (i) {
             case 0: snprintf(val, sizeof(val), "%s", kPalettes[gColorIdx].name); break;
             case 1: snprintf(val, sizeof(val), "%d%%", (int)gBright); break;
-            case 2: snprintf(val, sizeof(val), "%d%%", (int)gExtBright); break;
+            case 2:
+                if (gExtBright == 0) strncpy(val, "OFF", sizeof(val));
+                else snprintf(val, sizeof(val), "%d%%", (int)gExtBright);
+                break;
 #if defined(RADAR_CSI)
             case 3: {
                 String cur = WiFi.SSID();
@@ -723,6 +893,8 @@ static void drawBottom() {
   const bool linkOk  = !radar.stale(750);
   const bool calib   = (strcmp(s.mode, "CAL") == 0);
   const bool present = linkOk && s.presence;
+  const bool calRun  = linkOk && gCalPct >= 0;   // on-device CSI calibration
+  const uint16_t cOrange = canvas.color565(255, 140, 0);
 
   const uint16_t cMag    = gColA;
   const uint16_t cCyan   = gColB;
@@ -760,27 +932,52 @@ static void drawBottom() {
   canvas.setTextColor(TFT_WHITE, pill);
   canvas.drawString(tag, W - tw + 1, 3);
 
-  // presence / clear banner
-  uint16_t bg     = present ? canvas.color565(60, 0, 60) : canvas.color565(0, 0, 25);
-  uint16_t border = present ? cMag : cPurple;
-  canvas.fillRoundRect(4, 17, W - 8, 34, 4, bg);
-  canvas.drawRoundRect(4, 17, W - 8, 34, 4, border);
-  canvas.setTextSize(2);
-  const char* lbl = present ? ">> CONTACT <<" : "~~ CLEAR ~~";
-  canvas.setTextColor(present ? canvas.color565(255, 100, 255) : cCyan, bg);
-  canvas.drawString(lbl, (W - canvas.textWidth(lbl)) / 2, 25);
+  // presence / clear banner (calibration: label + progress bar)
+  if (calRun) {
+    const uint16_t bg = canvas.color565(40, 18, 0);
+    canvas.fillRoundRect(4, 17, W - 8, 34, 4, bg);
+    canvas.drawRoundRect(4, 17, W - 8, 34, 4, cOrange);
+    canvas.setTextSize(2);
+    canvas.setTextColor(cOrange, bg);
+    const char* lbl = "CALIBRATING";
+    canvas.drawString(lbl, (W - canvas.textWidth(lbl)) / 2, 21);
+    const int bx = 14, by = 41, bw = W - 28;
+    canvas.drawRect(bx, by, bw, 6, canvas.color565(110, 60, 0));
+    canvas.fillRect(bx + 1, by + 1, (bw - 2) * gCalPct / 100, 4, cOrange);
+  } else {
+    uint16_t bg     = present ? canvas.color565(60, 0, 60) : canvas.color565(0, 0, 25);
+    uint16_t border = present ? cMag : cPurple;
+    canvas.fillRoundRect(4, 17, W - 8, 34, 4, bg);
+    canvas.drawRoundRect(4, 17, W - 8, 34, 4, border);
+    canvas.setTextSize(2);
+    const char* lbl = present ? ">> CONTACT <<" : "~~ CLEAR ~~";
+    canvas.setTextColor(present ? canvas.color565(255, 100, 255) : cCyan, bg);
+    canvas.drawString(lbl, (W - canvas.textWidth(lbl)) / 2, 25);
+  }
 
   // motion graph
   canvas.setTextSize(1);
   const int gx = 4, gy = 54, gw = W - 8, gh = 50;
   canvas.drawRect(gx, gy, gw, gh, cBorder);
   int ty = gy + gh - 1 - (int)(gThreshold * (gh - 2));
-  canvas.drawFastHLine(gx + 1, ty, gw - 2, canvas.color565(180, 0, 180));
+  if (!calRun) canvas.drawFastHLine(gx + 1, ty, gw - 2, canvas.color565(180, 0, 180));
 
-  int cols = gw - 2;
+  int cols = calRun ? 0 : gw - 2;   // calibrating: instructions instead of bars
   int n    = RadarLink::historySize();
   if (cols > n) cols = n;
   int xoff = (gw - 2) - cols;
+  if (calRun) {
+    const char* l1 = gCalWaiting ? "waiting for WiFi traffic" : "keep still or step away";
+    const char* l2 = gCalWaiting ? "no CSI frames yet"        : "learning the empty room";
+    char pct[8];
+    snprintf(pct, sizeof(pct), "%d%%", gCalPct);
+    canvas.setTextColor(gCalWaiting ? cOrange : cCyan, TFT_BLACK);
+    canvas.drawString(l1, (W - canvas.textWidth(l1)) / 2, gy + 9);
+    canvas.setTextColor(canvas.color565(130, 130, 130), TFT_BLACK);
+    canvas.drawString(l2, (W - canvas.textWidth(l2)) / 2, gy + 21);
+    canvas.setTextColor(cOrange, TFT_BLACK);
+    canvas.drawString(pct, (W - canvas.textWidth(pct)) / 2, gy + 33);
+  }
   for (int i = 0; i < cols; ++i) {
     float v = radar.historyAt(n - cols + i);
     int barh = (int)(v * (gh - 2));
@@ -796,11 +993,26 @@ static void drawBottom() {
   // footer
   char foot[48];
   snprintf(foot, sizeof(foot), "mot %3d%%  rssi %ddBm  thr %2d%%",
-           (int)(s.motion * 100), s.rssi, (int)(gThreshold * 100));
+           (int)(s.motion * 100), s.rssi, (int)lroundf(gThreshold * 100));
   canvas.setTextColor(cCyan, TFT_BLACK);
   canvas.drawString(foot, 4, gy + gh + 4);
+#if defined(RADAR_CSI)
+  // phone glyph + number of phones watching the web view
+  const int viewers = web.sseClients();
+  if (viewers > 0) {
+    const int px = W - 20, py = gy + gh + 3;
+    canvas.drawRoundRect(px, py, 6, 9, 1, cCyan);
+    canvas.drawFastHLine(px + 2, py + 6, 2, cCyan);
+    char nv[4];
+    snprintf(nv, sizeof(nv), "%d", viewers);
+    canvas.drawString(nv, px + 8, py + 1);
+  }
   canvas.setTextColor(cPurple, TFT_BLACK);
-  canvas.drawString(",.mode [c]cal  [ [ ]thr-  [ ] ]thr+", 4, gy + gh + 15);
+  canvas.drawString("c:cal ,/:thr .:view q:phone", 4, gy + gh + 15);
+#else
+  canvas.setTextColor(cPurple, TFT_BLACK);
+  canvas.drawString("c:cal ,/:thr .:view `:menu", 4, gy + gh + 15);
+#endif
 
   // outer frame + corner dots
   canvas.drawFastHLine(0,   0,   W, cBorder);
@@ -877,8 +1089,14 @@ static volatile int      gSniffVendor  = 0;
 static volatile bool     gSniffPending = false;
 
 static void IRAM_ATTR sniffCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
-    if (gSniffPending) return;
     const wifi_promiscuous_pkt_t* pkt = (const wifi_promiscuous_pkt_t*)buf;
+    // Uplink data frame (ToDS=1, FromDS=0) whose final destination (addr3) is
+    // us: addr2 is a station talking to the Cardputer, e.g. the phone view.
+    if (type == WIFI_PKT_DATA && pkt->rx_ctrl.sig_len >= 24) {
+        const uint8_t* h = pkt->payload;
+        if ((h[1] & 0x03) == 0x01 && memcmp(h + 16, gMyMac, 6) == 0) learnPeerMac(h + 10);
+    }
+    if (gSniffPending) return;
     if (pkt->rx_ctrl.sig_len < 16) return;
     const uint8_t* src = pkt->payload + 10;  // Address 2 = source MAC in all common frame types
     for (int i = 0; i < kNumCamOuis; i++) {
@@ -925,6 +1143,211 @@ static void serviceCam() {
     camBlips[slot].active   = true;
     strncpy(camBlips[slot].vendor, kCamOuis[vendorIdx].name, 7);
     camBlips[slot].vendor[7] = '\0';
+}
+#endif  // RADAR_CSI
+
+// Threshold step shared by the keyboard and the phone view. Snapped to 5 %
+// steps so repeated float adds don't drift (0.30 showing as 29 %). Saved to
+// NVS a moment after the last step, so a burst of presses is one flash write.
+static void nudgeThreshold(float d) {
+  gThreshold = roundf((gThreshold + d) * 20.0f) / 20.0f;
+  if (gThreshold < 0.05f) gThreshold = 0.05f;
+  if (gThreshold > 0.95f) gThreshold = 0.95f;
+  gSavePending = true;
+  gSaveAt      = millis() + 1500;
+#if !RADAR_FAKE
+  radar.setThreshold(gThreshold);
+#endif
+}
+
+// `c` key / phone CAL button: learn a new empty-room baseline.
+static void requestCalibration() {
+#if defined(RADAR_CSI)
+  if (wifiReady) startCalibration();   // no WiFi = no CSI frames to learn from
+#else
+  radar.calibrate();
+#endif
+}
+
+// --------------------------------------------------------------------------
+// Phone view: web/index.html is embedded at build time (board_build.
+// embed_txtfiles) and served by WebView. The phone draws the scope itself
+// from a ~15 Hz frame stream, so the Cardputer only ships numbers:
+//   (default) {"q":seq,"p":presence,"m":motion‰,"r":rssi,"t":threshold%}
+//             + "c":progress%,"cw":0|1 (no CSI frames) while calibrating
+//   st        status at 1 Hz: ip, ssid, channel, battery, palette, CSI fps, cams
+//   hist      motion history (0..100) once per new client
+// Phone -> Cardputer: GET /cmd?k=dn | k=up (threshold) | k=pal (palette)
+//                    | k=cal (calibrate)
+// --------------------------------------------------------------------------
+#if defined(RADAR_CSI)
+extern const uint8_t kWebPage[]    asm("_binary_web_index_html_start");
+extern const uint8_t kWebPageEnd[] asm("_binary_web_index_html_end");
+static bool     gWebUp   = false;
+static uint32_t gCsiFps  = 0;
+
+// Bounded append-only text buffer (truncates instead of overflowing).
+struct TextBuf {
+  char*  p;
+  size_t cap;
+  size_t n;
+  TextBuf(char* buf, size_t size) : p(buf), cap(size), n(0) { if (cap) p[0] = '\0'; }
+  void add(const char* fmt, ...) __attribute__((format(printf, 2, 3))) {
+    if (n + 1 >= cap) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vsnprintf(p + n, cap - n, fmt, ap);
+    va_end(ap);
+    if (w > 0) n = (n + (size_t)w < cap) ? n + (size_t)w : cap - 1;
+  }
+};
+
+static void addStatusJson(TextBuf& o) {
+  wifi_ap_record_t ap = {};
+  char ssid[66] = "";
+  if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+    // JSON-escape the SSID: only quote/backslash need it; drop control bytes
+    size_t j = 0;
+    for (size_t i = 0; ap.ssid[i] && i < sizeof(ap.ssid) && j + 2 < sizeof(ssid); i++) {
+      char ch = (char)ap.ssid[i];
+      if ((uint8_t)ch < 0x20) continue;
+      if (ch == '"' || ch == '\\') ssid[j++] = '\\';
+      ssid[j++] = ch;
+    }
+    ssid[j] = '\0';
+  }
+  const Palette& pl = kPalettes[gColorIdx];
+  o.add("{\"ip\":\"%s\",\"ss\":\"%s\",\"ch\":%d,\"bat\":%d,\"chg\":%d,"
+        "\"pa\":[%u,%u,%u,%u,%u,%u],\"csi\":%lu,\"n\":%d,\"cam\":[",
+        wifiIP, ssid, (int)ap.primary, (int)M5.Power.getBatteryLevel(),
+        M5.Power.isCharging() == 1 ? 1 : 0,
+        pl.aR, pl.aG, pl.aB, pl.bR, pl.bG, pl.bB,
+        (unsigned long)gCsiFps, web.sseClients());
+  const uint32_t now = millis();
+  bool first = true;
+  for (int i = 0; i < 8; i++) {
+    const CamBlip& cb = camBlips[i];
+    if (!cb.active || now - cb.lastSeen > CAM_LIFE) continue;
+    o.add("%s[\"%s\",%d,%d,%d]", first ? "" : ",", cb.vendor, (int)cb.rssi,
+          (int)lroundf(cb.ang * 1000.0f), (int)lroundf(cb.rad * 10.0f));
+    first = false;
+  }
+  o.add("]}");
+}
+
+// Raw SSE text sent once to each new stream, right after the headers.
+static size_t onWebHello(char* buf, size_t cap) {
+  TextBuf o{buf, cap};
+  o.add("event: hist\ndata: [");
+  for (int i = 0; i < RadarLink::historySize(); i++)
+    o.add(i ? ",%d" : "%d", (int)lroundf(radar.historyAt(i) * 100.0f));
+  o.add("]\n\nevent: st\ndata: ");
+  addStatusJson(o);
+  o.add("\n\n");
+  return o.n;
+}
+
+static void onWebCmd(const char* q) {
+  if (!strcmp(q, "k=dn"))       nudgeThreshold(-0.05f);
+  else if (!strcmp(q, "k=up"))  nudgeThreshold(+0.05f);
+  else if (!strcmp(q, "k=cal")) requestCalibration();
+  else if (!strcmp(q, "k=pal")) { applyPalette((gColorIdx + 1) % kNumPalettes); saveSettings(); }
+}
+
+static void serviceWeb() {
+  const uint32_t now = millis();
+  if (!gWebUp) {
+    static uint32_t lastTry = 0;
+    if (!wifiReady || (lastTry && now - lastTry < 3000)) return;
+    lastTry = now;
+    gWebUp = web.begin(80, kWebPage, (size_t)(kWebPageEnd - kWebPage) - 1,  // drop trailing NUL
+                       onWebCmd, onWebHello);
+    if (!gWebUp) return;
+    if (MDNS.begin("radar")) MDNS.addService("http", "tcp", 80);
+    Serial.printf("# Phone view: http://%s/  (http://radar.local/)\n", wifiIP);
+    gQrShow = true;                      // offer the QR once after boot
+    gQrSeen = web.sseConnects();
+  }
+  web.poll();
+  if (gQrShow && web.sseConnects() != gQrSeen) gQrShow = false;   // a phone opened it
+
+  static uint32_t lastSeq = 0;
+  const auto& s = radar.state();
+  if (s.seq != lastSeq) {
+    lastSeq = s.seq;
+    if (web.sseClients() > 0) {
+      char d[96];
+      int  len = snprintf(d, sizeof(d), "{\"q\":%lu,\"p\":%d,\"m\":%d,\"r\":%d,\"t\":%d",
+                          (unsigned long)s.seq, s.presence ? 1 : 0,
+                          (int)lroundf(s.motion * 1000.0f), s.rssi,
+                          (int)lroundf(gThreshold * 100.0f));
+      if (gCalPct >= 0)   // calibrating: progress, and whether CSI frames are missing
+        len += snprintf(d + len, sizeof(d) - len, ",\"c\":%d,\"cw\":%d", gCalPct, gCalWaiting ? 1 : 0);
+      snprintf(d + len, sizeof(d) - len, "}");
+      web.broadcast(nullptr, d);
+    }
+  }
+
+  static uint32_t lastSt = 0, lastCnt = 0;
+  if (now - lastSt >= 1000) {
+    const uint32_t cnt = gCsiCount;
+    gCsiFps = lastSt ? (cnt - lastCnt) * 1000 / (now - lastSt) : 0;
+    lastCnt = cnt;
+    lastSt  = now;
+    if (web.sseClients() > 0) {
+      char b[640];
+      TextBuf o{b, sizeof(b)};
+      addStatusJson(o);
+      web.broadcast("st", b);
+    }
+  }
+}
+
+// Built-in screen card: QR code + URL for the phone view.
+static void drawQr() {
+  const int W = canvas.width(), H = canvas.height();
+  const uint16_t cBar = canvas.color565(20, 0, 35);
+  const uint16_t cDim = canvas.color565(110, 110, 110);
+  canvas.fillSprite(TFT_BLACK);
+  canvas.fillRect(0, 0, W, 14, cBar);
+  canvas.drawFastHLine(0, 13, W, gColA);
+  canvas.setTextSize(1);
+  canvas.setTextColor(gColA, cBar);
+  const char* hdr = ">> PHONE VIEW <<";
+  canvas.drawString(hdr, (W - canvas.textWidth(hdr)) / 2, 3);
+
+  if (!wifiReady || !gWebUp) {
+    canvas.setTextColor(TFT_RED, TFT_BLACK);
+    const char* m = "No WiFi yet";
+    canvas.drawString(m, (W - canvas.textWidth(m)) / 2, H / 2 - 4);
+    canvas.pushSprite(0, 0);
+    return;
+  }
+
+  char url[32];
+  snprintf(url, sizeof(url), "http://%s/", wifiIP);
+  // White border = quiet zone of ~2 modules around the 25x25 code.
+  canvas.fillRect(4, 17, 116, 116, TFT_WHITE);
+  canvas.qrcode(url, 8, 21, 108, 2);
+
+  const int tx = 126;
+  canvas.setTextColor(gColB, TFT_BLACK);
+  canvas.drawString("Scan with your", tx, 20);
+  canvas.drawString("phone camera", tx, 30);
+  canvas.setTextColor(cDim, TFT_BLACK);
+  canvas.drawString("or open:", tx, 46);
+  canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+  canvas.drawString(wifiIP, tx, 57);
+  canvas.setTextColor(cDim, TFT_BLACK);
+  canvas.drawString("radar.local", tx, 68);
+  canvas.drawString("same WiFi needed", tx, 84);
+  char nv[20];
+  snprintf(nv, sizeof(nv), "phones: %d", web.sseClients());
+  canvas.setTextColor(gColB, TFT_BLACK);
+  canvas.drawString(nv, tx, 100);
+  canvas.setTextColor(canvas.color565(70, 70, 70), TFT_BLACK);
+  canvas.drawString("any key: close", tx, 120);
+  canvas.pushSprite(0, 0);
 }
 #endif  // RADAR_CSI
 
@@ -1378,16 +1801,21 @@ static void drawRaycaster() {
   bool blink = (now % 600) < 300;
   topCanvas.fillRect(0, H - barH, W, barH, cBar);
   topCanvas.drawFastHLine(0, H - barH, W, cBorder);
-  const char* ctlbl = present ? ">>CONTACT<<" : " scanning.. ";
-  uint16_t ctCol = present
+  const bool calRun = linkOk && gCalPct >= 0;
+  const char* ctlbl = calRun ? "CALIBRATING" : present ? ">>CONTACT<<" : " scanning.. ";
+  uint16_t ctCol = calRun
+    ? (blink ? topCanvas.color565(255, 140, 0) : topCanvas.color565(120, 60, 0))
+    : present
     ? (blink ? topCanvas.color565(255, 60, 255) : topCanvas.color565(110, 0, 100))
     : topCanvas.color565(55, 0, 70);
   topCanvas.setTextColor(ctCol, cBar);
   topCanvas.drawString(ctlbl, 14, H - 11);
   char midStr[14];
-  if (present) snprintf(midStr, sizeof(midStr), "BRG:%03.0f", gLastBrg);
-  else         snprintf(midStr, sizeof(midStr), "T:%d%%",     (int)(gThreshold * 100));
-  topCanvas.setTextColor(present ? topCanvas.color565(255, 140, 60) : topCanvas.color565(100, 0, 110), cBar);
+  if (calRun)       snprintf(midStr, sizeof(midStr), "CAL %d%%",   gCalPct);
+  else if (present) snprintf(midStr, sizeof(midStr), "BRG:%03.0f", gLastBrg);
+  else              snprintf(midStr, sizeof(midStr), "T:%d%%",     (int)lroundf(gThreshold * 100));
+  topCanvas.setTextColor(calRun ? topCanvas.color565(255, 140, 0)
+                         : present ? topCanvas.color565(255, 140, 60) : topCanvas.color565(100, 0, 110), cBar);
   topCanvas.drawString(midStr, (W - topCanvas.textWidth(midStr)) / 2, H - 11);
   char stats[24];
   snprintf(stats, sizeof(stats), "M:%d%% %ddBm", (int)(s.motion * 100), s.rssi);
@@ -1616,17 +2044,22 @@ static void drawTop() {
   // --- layer 7: status bar ---
   topCanvas.fillRect(0, H - 14, W, 14, cBar);
   topCanvas.drawFastHLine(0, H - 14, W, cBorder);
-  const char* ctlbl = present ? ">>CONTACT<<" : " scanning.. ";
-  uint16_t ctCol = present
+  const bool calRun = linkOk && gCalPct >= 0;
+  const char* ctlbl = calRun ? "CALIBRATING" : present ? ">>CONTACT<<" : " scanning.. ";
+  uint16_t ctCol = calRun
+    ? (blink ? topCanvas.color565(255, 140, 0) : topCanvas.color565(120, 60, 0))
+    : present
     ? (blink ? topCanvas.color565(255, 60, 255) : topCanvas.color565(110, 0, 100))
     : topCanvas.color565(55, 0, 70);
   topCanvas.setTextColor(ctCol, cBar);
   topCanvas.drawString(ctlbl, 14, H - 11);
-  // center: bearing when contact active, threshold otherwise
+  // center: calibration progress, bearing when contact active, threshold otherwise
   char midStr[14];
-  if (present) snprintf(midStr, sizeof(midStr), "BRG:%03.0f", gLastBrg);
-  else         snprintf(midStr, sizeof(midStr), "T:%d%%",     (int)(gThreshold * 100));
-  topCanvas.setTextColor(present ? topCanvas.color565(255, 140, 60) : topCanvas.color565(100, 0, 110), cBar);
+  if (calRun)       snprintf(midStr, sizeof(midStr), "CAL %d%%",   gCalPct);
+  else if (present) snprintf(midStr, sizeof(midStr), "BRG:%03.0f", gLastBrg);
+  else              snprintf(midStr, sizeof(midStr), "T:%d%%",     (int)lroundf(gThreshold * 100));
+  topCanvas.setTextColor(calRun ? topCanvas.color565(255, 140, 0)
+                         : present ? topCanvas.color565(255, 140, 60) : topCanvas.color565(100, 0, 110), cBar);
   topCanvas.drawString(midStr, (W - topCanvas.textWidth(midStr)) / 2, H - 11);
   char stats[28];
   snprintf(stats, sizeof(stats), "C:%d M:%d%% %ddBm", contacts, (int)(s.motion * 100), s.rssi);
@@ -1669,20 +2102,15 @@ static void serviceKeys() {
         gMenuOpen = false;
       }
     } else {
+#if defined(RADAR_CSI)
+      if (gQrShow) { gQrShow = false; continue; }          // any key closes the QR card
+      if (c == 'q' || c == 'Q') { gQrShow = true; gQrSeen = web.sseConnects(); continue; }
+#endif
       if      (c == '`')             { gMenuOpen = true; gMenuCursor = 0; }
       else if (c == '.')             gViewMode = (gViewMode + 1) % 2;
-      else if (c == 'c' || c == 'C') radar.calibrate();
-      else if (c == ',') {
-        gThreshold -= 0.05f; if (gThreshold < 0.05f) gThreshold = 0.05f;
-#if !RADAR_FAKE
-        radar.setThreshold(gThreshold);
-#endif
-      } else if (c == '/') {
-        gThreshold += 0.05f; if (gThreshold > 0.95f) gThreshold = 0.95f;
-#if !RADAR_FAKE
-        radar.setThreshold(gThreshold);
-#endif
-      }
+      else if (c == 'c' || c == 'C') requestCalibration();
+      else if (c == ',')             nudgeThreshold(-0.05f);
+      else if (c == '/')             nudgeThreshold(+0.05f);
     }
   }
 }
@@ -1699,12 +2127,11 @@ void setup() {
   extPanel.init();
   extPanel.setRotation(7);
   extPanel.fillScreen(TFT_BLACK);
-  topCanvas.setColorDepth(16);
-  extReady = (topCanvas.createSprite(240, 180) != nullptr);  // 240x180 * EXT_ZOOM = 320x240, fills panel
 
   randomSeed(micros());
   loadSettings();
   applyBrightness();
+  setExtPanelOn(gExtBright > 0);   // EXT PANEL = OFF: no top canvas at all
 
 #if RADAR_FAKE
   camBlips[0].mac3[0] = 0x65; camBlips[0].mac3[1] = 0xDE; camBlips[0].mac3[2] = 0xAA;
@@ -1735,6 +2162,7 @@ void loop() {
 #elif defined(RADAR_CSI)
   serviceCsi();
   serviceCam();
+  serviceWeb();
 #elif defined(RADAR_UDP)
   serviceUDP();
 #else
@@ -1743,10 +2171,18 @@ void loop() {
 
   uint32_t now = millis();
 
+  if (gSavePending && (int32_t)(now - gSaveAt) >= 0) { gSavePending = false; saveSettings(); }
 
   static uint32_t lastBot = 0, lastTop = 0;
-  if (now - lastBot >= 33) { lastBot = now; if (gMenuOpen) drawMenu(); else drawBottom(); }
-  if (extReady && now - lastTop >= 125) {
+  if (now - lastBot >= 33) {
+    lastBot = now;
+    if (gMenuOpen) drawMenu();
+#if defined(RADAR_CSI)
+    else if (gQrShow) drawQr();
+#endif
+    else drawBottom();
+  }
+  if (extReady && gExtBright > 0 && now - lastTop >= 125) {
     lastTop = now;
     if (gViewMode == 0) drawTop(); else drawRaycaster();
   }

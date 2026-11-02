@@ -1,0 +1,759 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CSI Radar">
+<title>CSI Radar</title>
+<link rel="icon" href="data:,">
+<!--
+  Phone view for the Cardputer WiFi-CSI radar.
+  Served by the Cardputer (include/web_view.h). It receives ~15 Hz frames over
+  Server-Sent Events from /ev and redraws the external-TFT scope (PPI + 3-D
+  views) itself, so only a few numbers cross the WiFi.
+  Open this file straight from disk (file://) or add ?demo to get fake data.
+-->
+<style>
+:root{--a:#dc00c8;--b:#00dcdc;--bar:#140023;--line:#a000a0;--dim:#7a5a88;--ink:#eee4f6;--bad:#ff3a4a}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#000;color:var(--ink);
+  font:13px/1.35 ui-monospace,"SF Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace;
+  -webkit-text-size-adjust:100%;user-select:none;-webkit-user-select:none;
+  -webkit-tap-highlight-color:transparent;overscroll-behavior:none}
+#app{display:flex;flex-direction:column;height:100vh;height:100dvh;
+  padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+#stage{position:relative;flex:none;width:min(100%,calc(64vh * 4 / 3));width:min(100%,calc(64dvh * 4 / 3));
+  aspect-ratio:4/3;margin:0 auto}
+#scope{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:manipulation;cursor:pointer}
+#panel{flex:1;min-height:0;display:flex;flex-direction:column;gap:10px;padding:10px 12px 12px;
+  width:100%;max-width:640px;margin:0 auto}
+#banner{border:1px solid #46004a;border-radius:6px;padding:9px 6px;text-align:center;font-size:22px;
+  font-weight:700;letter-spacing:.06em;color:var(--b);background:#000019;transition:background .2s,box-shadow .2s}
+#banner.on{color:#ff64ff;background:#3c003c;border-color:var(--a);box-shadow:0 0 22px -6px var(--a)}
+#banner.off{color:var(--bad);border-color:#5a1020;background:#14000a}
+#banner.cal{color:#ff8c00;border-color:#ff8c00;
+  background:linear-gradient(90deg,#4a2600 var(--p,0%),#1a0d00 var(--p,0%))}
+#stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+#stats div{background:var(--bar);border:1px solid #2c0042;border-radius:5px;padding:5px 4px;text-align:center;min-width:0}
+#stats span{display:block;font-size:10px;color:var(--dim);letter-spacing:.08em}
+#stats b{display:block;font-size:16px;color:var(--b);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#graphBox{position:relative;flex:1 1 auto;min-height:64px;border:1px solid var(--line);border-radius:4px;background:#000}
+#graph{position:absolute;inset:0;width:100%;height:100%;display:block}
+#btns{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px}
+button{font:inherit;font-size:12px;font-weight:700;color:var(--ink);background:var(--bar);border:1px solid var(--line);
+  border-radius:6px;padding:12px 0;letter-spacing:.04em;touch-action:manipulation}
+button:active{background:#3c003c}
+button.on{color:#000;background:var(--b);border-color:var(--b)}
+#foot{display:flex;gap:8px;align-items:center;font-size:11px;color:var(--dim);min-width:0}
+#info{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pill{flex:none;padding:2px 7px;border-radius:9px;color:#fff;font-weight:700;background:#b01828}
+.pill.ok{background:#00a050}
+.pill.demo{background:#a06000}
+@media (orientation:landscape) and (min-aspect-ratio:5/4){
+  #app{flex-direction:row}
+  #stage{width:min(66vw,calc(100vh * 4 / 3));width:min(66vw,calc(100dvh * 4 / 3));align-self:center;margin:0}
+  #panel{max-width:none;justify-content:center;padding:8px 10px}
+  #banner{font-size:18px;padding:6px}
+  button{padding:10px 0}
+}
+</style>
+</head>
+<body>
+<main id="app">
+  <div id="stage"><canvas id="scope" aria-label="Radar scope (tap to switch view)"></canvas></div>
+  <section id="panel">
+    <div id="banner" class="off">CONNECTING</div>
+    <div id="stats">
+      <div><span>MOTION</span><b id="vMot">--</b></div>
+      <div><span>RSSI dBm</span><b id="vRssi">--</b></div>
+      <div><span>THRESH</span><b id="vThr">--</b></div>
+      <div><span>CONTACTS</span><b id="vCon">0</b></div>
+    </div>
+    <div id="graphBox"><canvas id="graph"></canvas></div>
+    <div id="btns">
+      <button id="bView" aria-label="Switch radar view">3D</button>
+      <button data-k="dn" aria-label="Threshold down">THR&minus;</button>
+      <button data-k="up" aria-label="Threshold up">THR+</button>
+      <button data-k="cal" aria-label="Calibrate: learn the empty room">CAL</button>
+      <button data-k="pal" aria-label="Next color palette">COLOR</button>
+      <button id="bSnd" aria-label="Sonar sound">SOUND</button>
+    </div>
+    <div id="foot"><span id="link" class="pill">OFFLINE</span><span id="info"></span></div>
+  </section>
+</main>
+<script>
+(() => {
+'use strict';
+const TAU = Math.PI * 2;
+const $ = id => document.getElementById(id);
+const DEMO = location.protocol === 'file:' || /[?&]demo\b/.test(location.search);
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const rnd = (a, b) => a + Math.floor(Math.random() * (b - a));     // like Arduino random(a, b)
+const rgb = (r, g, b) => `rgb(${r | 0},${g | 0},${b | 0})`;
+
+// Same five palettes as the Cardputer (kPalettes): accent A, accent B.
+const PALS = [[220,0,200,0,220,220],[0,220,80,0,180,100],[255,180,0,220,140,0],
+              [255,40,40,255,120,40],[40,120,255,0,200,255]];
+
+// ---------------------------------------------------------------- state ----
+const S = { seq: 0, pres: false, mot: 0, rssi: 0, thr: 0.35, last: -1e9, cal: -1, calWait: false,
+            ip: '', ss: '', ch: 0, bat: -1, chg: 0, csi: 0, n: 0, cams: [] };
+const HN = 240;                                   // RadarLink::kHistory
+const hist = new Float32Array(HN);
+let hHead = 0, palA = PALS[0].slice(0, 3), palB = PALS[0].slice(3), demoPal = 0;
+const linkOk = now => now - S.last < 750;         // radar.stale(750) on the device
+
+function onFrame(j) {
+  S.seq = j.q; S.pres = !!j.p; S.mot = (j.m || 0) / 1000; S.rssi = j.r | 0;
+  if (j.t) S.thr = j.t / 100;
+  S.cal = 'c' in j ? j.c | 0 : -1;               // calibration progress, -1 = not calibrating
+  S.calWait = !!j.cw;                             // calibrating but no CSI frames arriving
+  S.last = performance.now();
+  hist[hHead] = S.mot; hHead = (hHead + 1) % HN;
+  uiDirty = true;
+}
+function onHist(a) {
+  hist.fill(0); hHead = 0;
+  for (const v of a.slice(-HN)) { hist[hHead] = v / 100; hHead = (hHead + 1) % HN; }
+  uiDirty = true;
+}
+function onStatus(j) {
+  Object.assign(S, { ip: j.ip || '', ss: j.ss || '', ch: j.ch | 0, bat: j.bat ?? -1,
+                     chg: j.chg | 0, csi: j.csi | 0, n: j.n | 0 });
+  if (Array.isArray(j.pa) && j.pa.length === 6) {
+    palA = j.pa.slice(0, 3); palB = j.pa.slice(3);
+    document.documentElement.style.setProperty('--a', rgb(...palA));
+    document.documentElement.style.setProperty('--b', rgb(...palB));
+  }
+  S.cams = (j.cam || []).map(c => ({ v: c[0], rssi: c[1], ang: c[2] / 1000, rad: c[3] / 10 }));
+  uiDirty = true;
+}
+
+// ----------------------------------------------------------- link layer ----
+let es = null, esAt = 0;
+function connect() {
+  if (es) es.close();
+  esAt = performance.now();
+  es = new EventSource('/ev');
+  const safe = fn => e => { try { fn(JSON.parse(e.data)); } catch (_) {} };
+  es.onmessage = safe(onFrame);
+  es.addEventListener('st', safe(onStatus));
+  es.addEventListener('hist', safe(onHist));
+}
+function cmd(k) {
+  if (DEMO) {
+    if (k === 'dn') S.thr = clamp(Math.round((S.thr - 0.05) * 20) / 20, 0.05, 0.95);
+    if (k === 'up') S.thr = clamp(Math.round((S.thr + 0.05) * 20) / 20, 0.05, 0.95);
+    if (k === 'cal') demoCal = performance.now();
+    if (k === 'pal') { demoPal = (demoPal + 1) % PALS.length; demoStatus(); }
+    uiDirty = true;
+    return;
+  }
+  fetch('/cmd?k=' + k, { cache: 'no-store' }).catch(() => {});
+}
+
+// Offline preview: same generator as serviceFake() on the Cardputer.
+let demoCal = 0;                                  // CAL pressed: fake a 13 s calibration
+function demoStatus() {
+  onStatus({ ip: 'demo', ss: 'offline preview', ch: 6, bat: 76, chg: 0, pa: PALS[demoPal],
+             csi: 0, n: 1, cam: [['Ring', -65, 2600, 407]] });
+}
+function startDemo() {
+  let seq = 0, phase = 0, person = false, until = 0;
+  setInterval(() => {
+    const now = performance.now();
+    if (demoCal) {
+      const pct = Math.floor((now - demoCal) / 130);
+      if (pct < 100) { onFrame({ q: ++seq, p: 0, m: 0, r: -45 - rnd(0, 25), t: Math.round(S.thr * 100), c: pct, cw: 0 }); return; }
+      demoCal = 0;
+    }
+    if (now > until) { person = !person; until = now + (person ? rnd(4000, 9000) : rnd(3000, 7000)); }
+    phase += 0.2;
+    const base = person ? 0.25 : 0.02;
+    const wig = person ? 0.18 * (0.5 + 0.5 * Math.sin(phase)) : 0;
+    const m = Math.min(1, base + wig + Math.random() * (person ? 0.12 : 0.04));
+    onFrame({ q: ++seq, p: m > S.thr ? 1 : 0, m: Math.round(m * 1000), r: -45 - rnd(0, 25),
+              t: Math.round(S.thr * 100) });
+  }, 66);
+  demoStatus();
+  setInterval(demoStatus, 1000);
+}
+
+// ---------------------------------------------------------------- sound ----
+const sound = {
+  on: false, ac: null,
+  toggle() {
+    this.on = !this.on;
+    if (this.on && !this.ac) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) this.ac = new AC();
+    }
+    if (this.on && this.ac && this.ac.state === 'suspended') this.ac.resume();
+    return this.on;
+  },
+  beep(f0, f1, dur, vol) {
+    if (!this.on || !this.ac) return;
+    const t = this.ac.currentTime, o = this.ac.createOscillator(), g = this.ac.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g).connect(this.ac.destination);
+    o.start(t); o.stop(t + dur + 0.03);
+  },
+  ping()    { this.beep(1500, 950, 0.32, 0.10); },
+  contact() { this.beep(650, 1500, 0.20, 0.18); if (this.on && navigator.vibrate) navigator.vibrate(35); },
+};
+
+// ------------------------------------------------------------- drawing -----
+// Everything is drawn in the TFT's logical 240x180 space, scaled to fit.
+const cv = $('scope'), ctx = cv.getContext('2d');
+let K = 1;                                         // device px per logical px
+const FONT = '10px ui-monospace,"SF Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace';
+
+const fill = (x, y, w, h, c) => { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); };
+const px   = (x, y, c) => fill(x, y, 1, 1, c);
+const hline = (x, y, w, c) => fill(x, y, w, 1, c);
+function line(x1, y1, x2, y2, c) {
+  ctx.strokeStyle = c; ctx.lineWidth = 1; ctx.beginPath();
+  ctx.moveTo(x1 + 0.5, y1 + 0.5); ctx.lineTo(x2 + 0.5, y2 + 0.5); ctx.stroke();
+}
+function ring(x, y, r, c) {
+  ctx.strokeStyle = c; ctx.lineWidth = 1; ctx.beginPath();
+  ctx.arc(x + 0.5, y + 0.5, r, 0, TAU); ctx.stroke();
+}
+function disc(x, y, r, c) {
+  ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x + 0.5, y + 0.5, r + 0.5, 0, TAU); ctx.fill();
+}
+function ellipse(x, y, rx, ry, c) {
+  ctx.strokeStyle = c; ctx.lineWidth = 1; ctx.beginPath();
+  ctx.ellipse(x + 0.5, y + 0.5, rx, ry, 0, 0, TAU); ctx.stroke();
+}
+function fillEllipse(x, y, rx, ry, c) {
+  ctx.fillStyle = c; ctx.beginPath(); ctx.ellipse(x + 0.5, y + 0.5, rx + 0.5, ry + 0.5, 0, 0, TAU); ctx.fill();
+}
+function rect(x, y, w, h, c) { ctx.strokeStyle = c; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1); }
+function text(s, x, y, c) { ctx.fillStyle = c; ctx.fillText(s, x, y); }
+const tw = s => ctx.measureText(s).width;
+function glow(c, r) { ctx.shadowColor = c; ctx.shadowBlur = r * K; }
+function noGlow() { ctx.shadowBlur = 0; }
+
+// ------------------------------------------------------ contacts (blips) ---
+// Port of the spawn/merge logic in drawTop(): no bearing from one antenna, so
+// the angle is random and only the radius (from RSSI) carries information.
+const R = 74, CX = 120, CY = 90, BLIP_LIFE = 15000;
+const blips = Array.from({ length: 12 }, () => ({ ang: 0, rad: 0, str: 0, birth: 0, active: false }));
+const ripples = Array.from({ length: 6 }, () => ({ ang: 0, rad: 0, birth: 0, active: false }));
+let lastSpawn = -1e9, lastBrg = 0, prevSweep = 0;
+
+function pickBlipAngle() {           // avoids 6 and 12 o'clock (ghost in 3-D view)
+  const r = Math.random() * (TAU * 2 / 3), s1 = TAU / 6, s2 = TAU / 3;
+  if (r < s1) return r;
+  if (r < s1 + s2) return r - s1 + TAU / 3;
+  return r - s1 - s2 + TAU * 5 / 6;
+}
+function addRipple(ang, rad, now) {
+  const r = ripples.find(r => !r.active);
+  if (r) Object.assign(r, { ang, rad, birth: now, active: true });
+}
+function stepContacts(now) {
+  if (!(linkOk(now) && S.pres)) return;
+  const t = clamp((S.rssi + 45) / -33, 0, 1);
+  const target = Math.max(R * 0.30, R * (0.25 + t * 0.65));
+  let ci = -1, cd = R;
+  blips.forEach((b, i) => {
+    if (!b.active || b.birth + BLIP_LIFE <= now) return;
+    b.str += (S.mot - b.str) * 0.12;
+    const d = Math.abs(b.rad - target);
+    if (d < cd) { cd = d; ci = i; }
+  });
+  if (ci >= 0 && cd <= R * 0.20) {             // same contact: refresh + nudge
+    blips[ci].birth = now;
+    blips[ci].rad += (target - blips[ci].rad) * 0.05;
+  } else if (now - lastSpawn > 800) {          // new contact
+    let slot = blips.findIndex(b => !b.active);
+    if (slot < 0) slot = blips.reduce((o, b, i) => b.birth < blips[o].birth ? i : o, 0);
+    const ang = pickBlipAngle();
+    Object.assign(blips[slot], { ang, rad: target, str: S.mot, birth: now, active: true });
+    lastSpawn = now;
+    lastBrg = ((ang + TAU / 4) * (360 / TAU) + 360) % 360;
+    addRipple(ang, target, now);
+    sound.contact();
+  }
+}
+const liveContacts = now => blips.filter(b => b.active && now - b.birth <= BLIP_LIFE).length;
+
+// ----------------------------------------------------------- matrix rain ---
+const RAIN_X = [3, 9, 15, 21, 27, 33, 39, 201, 207, 213, 219, 225, 231, 237];
+const GLYPHS = '0123456789ABCDEF!:;@#%';
+const rain = RAIN_X.map(() => ({ y: rnd(-60, 160), speed: 2 + rnd(0, 3), tick: rnd(0, 4) }));
+function stepRain() {
+  for (const d of rain) {
+    if (++d.tick < d.speed) continue;
+    d.tick = 0; d.y += 8;
+    if (d.y > 180 + 7 * 8) { d.y = -rnd(0, 60); d.speed = 2 + rnd(0, 3); }
+  }
+}
+function drawRain(now) {
+  for (let i = 0; i < 14; i++) {
+    const cyan = i % 2 === 0;
+    for (let j = 6; j >= 0; j--) {
+      const ry = rain[i].y - j * 8;
+      if (ry < 0 || ry >= 180) continue;
+      const ch = GLYPHS[(i * 13 + j * 7 + Math.floor(now / 350)) % GLYPHS.length];
+      let c;
+      if (j === 0) c = cyan ? rgb(120, 255, 255) : rgb(220, 200, 255);
+      else { const b = (210 * (7 - j) / 7) | 0; c = cyan ? rgb(0, b / 2, b) : rgb(b / 2, 0, b); }
+      text(ch, RAIN_X[i], ry, c);
+    }
+  }
+}
+
+// --------------------------------------------------------- shared chrome ---
+function drawBat(bx, by) {
+  const level = S.bat, chg = S.chg === 1;
+  const c = level < 0 ? rgb(100, 100, 100) : chg ? rgb(0, 220, 255)
+          : level > 50 ? rgb(0, 200, 80) : level > 20 ? rgb(220, 160, 0) : rgb(220, 30, 30);
+  rect(bx, by, 14, 7, c);
+  fill(bx + 14, by + 2, 2, 3, c);
+  if (level > 0) fill(bx + 1, by + 1, Math.min(12, ((level * 12 + 50) / 100) | 0), 5, c);
+  if (chg) { hline(bx + 4, by + 3, 5, '#fff'); fill(bx + 6, by + 1, 1, 5, '#fff'); }
+  text(level < 0 ? '--%' : level + '%', bx + 17, by - 1, c);
+}
+function drawCamIcon(cx, cy, vendor) {
+  const amber = rgb(255, 190, 0), dark = rgb(10, 10, 10);
+  ctx.fillStyle = amber; ctx.beginPath();
+  ctx.roundRect ? ctx.roundRect(cx - 6, cy - 3, 12, 7, 1) : ctx.rect(cx - 6, cy - 3, 12, 7);
+  ctx.fill();
+  fill(cx - 2, cy - 5, 4, 2, amber);
+  ring(cx, cy, 3, dark); disc(cx, cy, 2, dark);
+  px(cx + 1, cy - 1, rgb(210, 210, 210));
+  if (vendor) {
+    ctx.save(); ctx.font = FONT.replace('10px', '7px');
+    text(vendor, cx + 8, cy - 3, rgb(170, 120, 0)); ctx.restore();
+  }
+}
+function drawChrome(now, title, present, contacts) {
+  const W = 240, H = 180, cBar = rgb(20, 0, 35), cBorder = rgb(160, 0, 160), ok = linkOk(now);
+  const blink = (now % 600) < 300;
+  // title bar
+  fill(0, 0, W, 14, cBar); hline(0, 13, W, cBorder);
+  text(title, (W - tw(title)) / 2, 2, rgb(...palA));
+  drawBat(2, 3);
+  const mode = DEMO ? 'DEMO' : ok ? 'LIVE' : 'NO LINK';
+  text(mode, W - tw(mode) - 4, 2, DEMO ? rgb(255, 170, 0) : ok ? rgb(0, 210, 80) : rgb(255, 40, 40));
+  // status bar
+  fill(0, H - 14, W, 14, cBar); hline(0, H - 14, W, cBorder);
+  const cal = ok && S.cal >= 0;
+  const ct = cal ? 'CALIBRATING' : present ? '>>CONTACT<<' : ' scanning.. ';
+  text(ct, 14, H - 12, cal ? (blink ? rgb(255, 140, 0) : rgb(120, 60, 0))
+                     : present ? (blink ? rgb(255, 60, 255) : rgb(110, 0, 100)) : rgb(55, 0, 70));
+  const mid = cal ? 'CAL ' + S.cal + '%'
+            : present ? 'BRG:' + String(Math.round(lastBrg)).padStart(3, '0') : 'T:' + Math.round(S.thr * 100) + '%';
+  text(mid, (W - tw(mid)) / 2, H - 12, cal ? rgb(255, 140, 0) : present ? rgb(255, 140, 60) : rgb(100, 0, 110));
+  const st = (contacts >= 0 ? 'C:' + contacts + ' ' : '') + 'M:' + Math.round(S.mot * 100) + '% ' + S.rssi + 'dBm';
+  text(st, W - tw(st) - 4, H - 12, rgb(...palB));
+  // frame + corners
+  hline(0, 0, W, cBorder); hline(0, H - 1, W, cBorder);
+  fill(0, 0, 1, H, cBorder); fill(W - 1, 0, 1, H, cBorder);
+  const cc = rgb(255, 120, 255);
+  fill(0, 0, 2, 2, cc); fill(W - 2, 0, 2, 2, cc); fill(0, H - 2, 2, 2, cc); fill(W - 2, H - 2, 2, 2, cc);
+}
+function drawNoLink(now, y) {
+  if (linkOk(now) || DEMO) return;
+  const msg = performance.now() - esAt < 2500 && S.last < 0 ? 'CONNECTING' : 'NO LINK';
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,.72)'; ctx.fillRect(60, y - 13, 120, 30);
+  rect(60, y - 13, 120, 30, rgb(255, 40, 40));
+  ctx.font = FONT.replace('10px', 'bold 12px');
+  const on = (now % 1000) < 650;
+  text(msg, 120 - tw(msg) / 2, y - 9, on ? rgb(255, 60, 60) : rgb(120, 20, 20));
+  ctx.font = FONT.replace('10px', '7px');
+  const sub = 'waiting for the Cardputer';
+  text(sub, 120 - tw(sub) / 2, y + 5, rgb(160, 110, 170));
+  ctx.restore();
+}
+
+// ------------------------------------------------------------- PPI view ----
+function drawPPI(now) {
+  const ok = linkOk(now), present = ok && S.pres;
+  const cB = rgb(...palB), cPurple = rgb(70, 0, 70), scopeBg = rgb(4, 0, 8);
+  const sweep = (now % 6000) / 6000 * TAU;
+
+  // sonar ping when the sweep arm crosses a contact
+  const ps = prevSweep % TAU, cs = sweep % TAU;
+  for (const b of blips) {
+    if (!b.active) continue;
+    const ba = ((b.ang % TAU) + TAU) % TAU;
+    const crossed = cs >= ps ? (ba >= ps && ba < cs) : (ba >= ps || ba < cs);
+    if (crossed) { addRipple(b.ang, b.rad, now); sound.ping(); }
+  }
+  prevSweep = sweep;
+
+  fill(0, 0, 240, 180, '#000');
+  drawRain(now);
+
+  // scope disc + grid
+  disc(CX, CY, R, scopeBg);
+  ring(CX, CY, R, rgb(0, 80, 100));
+  ring(CX, CY, (R * 2 / 3) | 0, rgb(80, 0, 100));
+  ring(CX, CY, (R / 3) | 0, rgb(0, 50, 80));
+  const xh = rgb(35, 0, 35);
+  line(CX, CY - R, CX, CY + R, xh);
+  line(CX - R, CY, CX + R, CY, xh);
+  for (let d = 0; d < 12; d++) {
+    const a = d * TAU / 12;
+    line(CX + ((R - 5) * Math.cos(a)) | 0, CY + ((R - 5) * Math.sin(a)) | 0,
+         CX + (R * Math.cos(a)) | 0, CY + (R * Math.sin(a)) | 0, cPurple);
+  }
+  const lbl = ['N', 'E', 'S', 'W'], base = [-TAU / 4, 0, TAU / 4, TAU / 2];
+  for (let i = 0; i < 4; i++) {
+    text(lbl[i], CX + ((R - 11) * Math.cos(base[i])) - 3, CY + ((R - 11) * Math.sin(base[i])) - 5,
+         i === 0 ? '#fff' : cB);
+  }
+  const rc = rgb(45, 0, 55);
+  text('1', CX + (R / 3 | 0) + 1, CY - 9, rc);
+  text('2', CX + (R * 2 / 3 | 0) + 1, CY - 9, rc);
+  text('3', CX + R + 1, CY - 9, rc);
+
+  // phosphor sweep trail: dark blue tail -> magenta head
+  const TRAIL = 22;
+  ctx.save();
+  ctx.globalAlpha = 0.7;
+  for (let k = TRAIL; k >= 1; k--) {
+    const a = sweep - k * 0.04, t = 1 - k / TRAIL, b2 = t * t;
+    ctx.fillStyle = rgb(220 * b2, 0, 40 + 160 * b2);
+    ctx.beginPath(); ctx.moveTo(CX + 0.5, CY + 0.5);
+    ctx.arc(CX + 0.5, CY + 0.5, R - 0.5, a, a + 0.042); ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+
+  // contacts: cyan -> purple -> magenta -> white-pink with strength
+  let contacts = 0;
+  for (const b of blips) {
+    if (!b.active) continue;
+    const age = now - b.birth;
+    if (age > BLIP_LIFE) { b.active = false; continue; }
+    contacts++;
+    const fade = 1 - age / BLIP_LIFE, s = b.str;
+    const bx = CX + (b.rad * Math.cos(b.ang)) | 0, by = CY + (b.rad * Math.sin(b.ang)) | 0;
+    const sz = 2 + ((s * 4) | 0);
+    const c = s > 0.85 ? rgb(255 * fade, 180 * fade, 255 * fade)
+            : s > 0.70 ? rgb(255 * fade, 0, 200 * fade)
+            : s > 0.50 ? rgb(140 * fade, 0, 255 * fade)
+            :            rgb(0, 200 * fade, 255 * fade);
+    glow(c, 6 * fade);
+    disc(bx, by, sz, c);
+    noGlow();
+    if (fade > 0.6) ring(bx, by, sz + 2, c);
+  }
+
+  // spy-cam markers (amber, stationary)
+  for (const c of S.cams) {
+    drawCamIcon(CX + (c.rad * Math.cos(c.ang)) | 0, CY + (c.rad * Math.sin(c.ang)) | 0, c.v);
+  }
+
+  // sonar ripples: white flash -> cyan fade
+  for (const r of ripples) {
+    if (!r.active) continue;
+    const age = now - r.birth;
+    if (age > 700) { r.active = false; continue; }
+    const p = age / 700, bx = CX + (r.rad * Math.cos(r.ang)) | 0, by = CY + (r.rad * Math.sin(r.ang)) | 0;
+    const sz = 4 + p * 22, f = 255 * (1 - p), rr = f * (1 - p);
+    ring(bx, by, sz, rgb(rr, f, f));
+    ring(bx, by, sz + 3, rgb(rr / 3, f / 3, f / 3));
+  }
+
+  // sweep leading edge
+  glow(rgb(255, 80, 255), 5);
+  line(CX, CY, CX + (R * Math.cos(sweep)) | 0, CY + (R * Math.sin(sweep)) | 0, rgb(255, 80, 255));
+  noGlow();
+
+  drawChrome(now, '[ WiFi-CSI RADAR ]', present, contacts);
+  drawNoLink(now, CY);
+}
+
+// ------------------------------------------------------------- 3-D view ----
+// Vaporwave floor radar from drawRaycaster(): we are the ghost in the middle.
+const g3d = { stars: [], birds: [], shot: { x: 0, y: 0, birth: 0, active: false } };
+(function init3D() {
+  const sceneY = 14, horizY = 69;
+  for (let i = 0; i < 12; i++) {
+    g3d.stars.push({ x: rnd(5, 235), y: sceneY + 2 + rnd(0, horizY - sceneY - 6), phase: rnd(0, 256) });
+  }
+  for (let i = 0; i < 3; i++) {
+    g3d.birds.push({ x: rnd(0, 240), y: sceneY + 6 + rnd(0, horizY - sceneY - 16),
+                     speed: 1 + rnd(0, 3), dir: rnd(0, 2) === 0 });
+  }
+})();
+function step3D(now) {
+  const sceneY = 14, horizY = 69;
+  for (const b of g3d.birds) {
+    b.x += b.dir ? b.speed : -b.speed;
+    if (b.dir && b.x > 252)  { b.x = -14; b.y = sceneY + 6 + rnd(0, horizY - sceneY - 16); }
+    if (!b.dir && b.x < -14) { b.x = 252; b.y = sceneY + 6 + rnd(0, horizY - sceneY - 16); }
+  }
+  const sh = g3d.shot;
+  if (!sh.active && rnd(0, 420) === 0) Object.assign(sh, { x: rnd(140, 230), y: sceneY + 2 + rnd(0, 10), birth: now, active: true });
+}
+function drawGhost(cx, cy) {
+  const body = rgb(215, 215, 252), eye = rgb(18, 18, 58), blush = rgb(255, 145, 175);
+  fillEllipse(cx, cy, 12, 15, body);
+  fill(cx - 12, cy + 8, 25, 7, body);
+  for (const [dx, dy] of [[-10, 15], [-5, 17], [0, 18], [5, 17], [10, 15]]) disc(cx + dx, cy + dy, 5, body);
+  fillEllipse(cx - 5, cy - 2, 3, 5, eye);
+  fillEllipse(cx + 5, cy - 2, 3, 5, eye);
+  fill(cx - 7, cy - 5, 2, 2, rgb(210, 210, 255));
+  fill(cx + 3, cy - 5, 2, 2, rgb(210, 210, 255));
+  px(cx - 3, cy + 5, eye); px(cx - 2, cy + 6, eye); px(cx + 2, cy + 6, eye); px(cx + 3, cy + 5, eye);
+  for (let dx = 7; dx <= 9; dx++) { px(cx - dx, cy + 2, blush); px(cx + dx, cy + 2, blush); }
+  ellipse(cx, cy, 12, 15, rgb(160, 160, 240));
+}
+function draw3D(now) {
+  const W = 240, H = 180, sceneY = 14, sceneBot = H - 14, horizY = sceneY + 55, vanishX = W / 2;
+  const ok = linkOk(now), present = ok && S.pres;
+  fill(0, 0, W, H, '#000');
+
+  // sky: dark purple -> magenta -> orange
+  const sky = ctx.createLinearGradient(0, sceneY, 0, horizY);
+  sky.addColorStop(0, rgb(15, 0, 55)); sky.addColorStop(0.5, rgb(165, 0, 35)); sky.addColorStop(1, rgb(255, 75, 20));
+  ctx.fillStyle = sky; ctx.fillRect(0, sceneY, W, horizY - sceneY);
+
+  for (const s of g3d.stars) {
+    const t = (Math.floor(now / 10) + s.phase * 22) % 300;
+    if (t > 220) continue;
+    const bri = t < 100 ? 255 : 255 - (t - 100) * 3;
+    px(s.x, s.y, rgb(bri, bri, bri * 0.88));
+    if (t < 55) { const d = rgb(bri / 3, bri / 3, bri / 4); px(s.x - 1, s.y, d); px(s.x + 1, s.y, d); }
+  }
+  const sh = g3d.shot;
+  if (sh.active) {
+    const age = now - sh.birth;
+    const sx = sh.x - ((age * 0.18) | 0), sy = sh.y + ((age * 0.09) | 0);
+    if (age > 550 || sy >= horizY - 2 || sx < 0) sh.active = false;
+    else {
+      const bri = 255 * (1 - age / 550), tr = Math.min(18, (age * 0.12) | 0);
+      if (sy - (tr >> 1) >= sceneY) line(sx, sy, sx + tr, sy - (tr >> 1), rgb(bri, bri * 0.8, bri));
+      px(sx, sy, '#fff');
+    }
+  }
+
+  // retrowave sun with horizontal cut stripes
+  const sunCx = vanishX, sunCy = 50, sunR = 35;
+  [[0, [255, 50, 80]], [6, [255, 100, 40]], [13, [255, 165, 20]], [20, [255, 215, 70]], [27, [255, 240, 150]]]
+    .forEach(([d, c]) => disc(sunCx, sunCy, sunR - d, rgb(...c)));
+  for (let stripe = 1; stripe <= 9; stripe++) {
+    const sy = sunCy + stripe * 4;
+    if (sy >= horizY) break;
+    const delta = sy - sunCy;
+    if (delta <= 0 || delta >= sunR) continue;
+    const sw = Math.sqrt(sunR * sunR - delta * delta) | 0, t = (sy - sceneY) / (horizY - sceneY);
+    fill(sunCx - sw, sy, sw * 2, 2, rgb(15 + t * 220, t > 0.5 ? (t - 0.5) * 150 : 0, 55 - t * 35));
+  }
+  for (const b of g3d.birds) {
+    if (b.x < -8 || b.x > W + 8 || b.y < sceneY || b.y >= horizY) continue;
+    const c = rgb(25, 10, 45);
+    line(b.x - 5, b.y - 2, b.x, b.y, c); line(b.x, b.y, b.x + 5, b.y - 2, c);
+  }
+
+  // floor + horizon glow + perspective grid
+  fill(0, horizY, W, sceneBot - horizY, rgb(5, 0, 15));
+  hline(0, horizY, W, rgb(255, 80, 120));
+  hline(0, horizY - 1, W, rgb(120, 20, 60));
+  for (let i = 1; i <= 7; i++) {
+    const t = i / 7, b = 15 + 32 * t;
+    hline(0, horizY + ((t * t * (sceneBot - horizY)) | 0), W, rgb(b, 0, b * 0.7));
+  }
+  for (let i = 0; i <= 8; i++) {
+    const t = i / 8, mc = 16 * (0.3 + 0.7 * (1 - Math.abs(t - 0.5) * 2));
+    line((t * W) | 0, sceneBot, vanishX, horizY, rgb(0, mc / 2, mc));
+  }
+
+  // radar floor ellipse
+  const rCx = W / 2, rCy = 122, rH = 108, rV = 40;
+  for (let b = 0; b < 12; b++) {
+    const a = b * TAU / 12;
+    line(rCx, rCy, rCx + ((Math.sin(a) * rH) | 0), rCy - ((Math.cos(a) * rV) | 0), rgb(42, 0, 58));
+  }
+  ellipse(rCx, rCy, (rH / 3) | 0, (rV / 3) | 0, rgb(60, 0, 82));
+  ellipse(rCx, rCy, (rH * 2 / 3) | 0, (rV * 2 / 3) | 0, rgb(88, 0, 115));
+  ellipse(rCx, rCy, rH, rV, rgb(132, 0, 165));
+  const lc = rgb(120, 0, 148);
+  text('N', rCx - 3, rCy - rV + 2, lc); text('S', rCx - 3, rCy + rV - 11, lc);
+  text('E', rCx + rH - 10, rCy - 5, lc); text('W', rCx - rH + 2, rCy - 5, lc);
+
+  // contacts as glitchy stick figures, perspective-scaled
+  let contacts = 0;
+  blips.forEach((b, i) => {
+    if (!b.active) return;
+    const age = now - b.birth;
+    if (age > BLIP_LIFE) { b.active = false; return; }
+    contacts++;
+    const brg = b.ang + TAU / 4, dist = b.rad / 74;
+    const csx = rCx + ((Math.sin(brg) * dist * rH) | 0), csy = rCy - ((Math.cos(brg) * dist * rV) | 0);
+    if (csy < horizY + 4 || csy > sceneBot - 2 || csx < 6 || csx > W - 6) return;
+    const persp = clamp(0.28 + 0.72 * (csy - (rCy - rV)) / (2 * rV), 0.1, 1);
+    const fade = 1 - age / BLIP_LIFE, s = b.str;
+    const figH = (8 + persp * 18) | 0, headR = Math.max(1, (figH / 5) | 0);
+    const headCy = csy - figH + headR, shY = headCy + headR + 2, hipY = csy - ((figH / 4) | 0);
+    const armW = Math.max(2, (figH / 4) | 0), legW = Math.max(1, (figH / 5) | 0);
+    if (headCy - headR < horizY + 2) return;
+    const fR = 220 * s * fade, fG = 220 * (1 - s * 0.7) * fade, fB = 255 * fade;
+    const fig = rgb(fR, fG, fB), dim = rgb(fR / 3, fG / 3, fB / 3);
+    glow(fig, 4 * fade);
+    disc(csx, headCy, headR, fig);
+    line(csx, shY, csx, hipY, fig);
+    line(csx, shY, csx - armW, shY + armW, fig); line(csx, shY, csx + armW, shY + armW, fig);
+    line(csx, hipY, csx - legW, csy, fig);       line(csx, hipY, csx + legW, csy, fig);
+    noGlow();
+    const nG = (s * 9 * fade) | 0;
+    let rng = (i * 1337 + Math.floor(now / 70)) >>> 0;
+    for (let g = 0; g < nG; g++) {
+      rng = (Math.imul(rng, 1664525) + 1013904223) >>> 0;
+      const gx = csx - armW - 2 + ((rng >>> 16) % (armW * 2 + 5));
+      rng = (Math.imul(rng, 1664525) + 1013904223) >>> 0;
+      const gy = headCy - 1 + ((rng >>> 16) % (figH + 3));
+      if (gx >= 0 && gx < W && gy > horizY && gy < sceneBot) px(gx, gy, (rng & 0x8000) ? fig : dim);
+    }
+    px(csx, csy, fig); px(csx - 1, csy, dim); px(csx + 1, csy, dim);
+  });
+
+  for (const c of S.cams) {
+    const brg = c.ang + TAU / 4, dist = c.rad / 74;
+    const x = rCx + ((Math.sin(brg) * dist * rH) | 0), y = rCy - ((Math.cos(brg) * dist * rV) | 0);
+    if (y < horizY + 4 || y > sceneBot - 2 || x < 8 || x > W - 8) continue;
+    drawCamIcon(x, y - 7, c.v);                 // slightly above floor = wall-mounted
+  }
+
+  drawChrome(now, '[ WiFi-CSI  3D ]', present, -1);
+  drawGhost(rCx, rCy - 5);
+  drawNoLink(now, 100);
+}
+
+// --------------------------------------------------------- bottom panel ----
+const gcv = $('graph'), gctx = gcv.getContext('2d');
+let gK = 1, uiDirty = true;
+function drawGraph(cal) {
+  const w = gcv.width, h = gcv.height;
+  if (!w || !h) return;
+  gctx.fillStyle = '#000'; gctx.fillRect(0, 0, w, h);
+  if (cal) {                                      // calibrating: instructions instead of bars
+    gctx.textAlign = 'center'; gctx.textBaseline = 'middle';
+    gctx.font = `bold ${12 * gK}px ui-monospace,Menlo,Consolas,monospace`;
+    gctx.fillStyle = S.calWait ? 'rgb(255,140,0)' : rgb(...palB);
+    gctx.fillText(S.calWait ? 'waiting for WiFi traffic' : 'keep still or step away', w / 2, h / 2 - 8 * gK);
+    gctx.font = `${10 * gK}px ui-monospace,Menlo,Consolas,monospace`;
+    gctx.fillStyle = 'rgb(140,140,140)';
+    gctx.fillText(S.calWait ? 'no CSI frames yet' : 'learning the empty room', w / 2, h / 2 + 8 * gK);
+    gctx.textAlign = 'start'; gctx.textBaseline = 'alphabetic';
+    return;
+  }
+  const pad = 2 * gK, ih = h - 2 * pad, bw = w / HN;
+  for (let i = 0; i < HN; i++) {
+    const v = hist[(hHead + i) % HN];
+    if (v <= 0) continue;
+    const bh = Math.max(gK, v * ih);
+    gctx.fillStyle = v > S.thr ? 'rgb(220,0,200)' : 'rgb(0,160,200)';
+    gctx.fillRect(Math.floor(i * bw), h - pad - bh, Math.ceil(bw), bh);
+  }
+  const ty = Math.round(h - pad - S.thr * ih);
+  gctx.fillStyle = 'rgb(180,0,180)';
+  gctx.fillRect(0, ty, w, Math.max(1, Math.round(gK)));
+  gctx.font = `${10 * gK}px ui-monospace,Menlo,Consolas,monospace`;
+  const lbl = 'thr ' + Math.round(S.thr * 100) + '%', lw = gctx.measureText(lbl).width;
+  gctx.fillStyle = 'rgba(0,0,0,.75)';
+  gctx.fillRect(2 * gK, ty - 14 * gK, lw + 4 * gK, 12 * gK);
+  gctx.fillStyle = 'rgb(220,120,220)';
+  gctx.fillText(lbl, 4 * gK, ty - 4 * gK);
+}
+const setText = (el, s) => { if (el.textContent !== s) el.textContent = s; };
+function updatePanel(now) {
+  const ok = linkOk(now) , present = ok && S.pres, cal = ok && S.cal >= 0;
+  const banner = $('banner');
+  banner.className = !ok ? 'off' : cal ? 'cal' : present ? 'on' : '';
+  banner.style.setProperty('--p', (cal ? S.cal : 0) + '%');
+  setText(banner, !ok ? (S.last < 0 ? 'CONNECTING' : 'NO LINK')
+                      : cal ? 'CALIBRATING ' + S.cal + '%' : present ? '>> CONTACT <<' : '~~ CLEAR ~~');
+  setText($('vMot'), ok ? Math.round(S.mot * 100) + '%' : '--');
+  setText($('vRssi'), ok ? String(S.rssi) : '--');
+  setText($('vThr'), Math.round(S.thr * 100) + '%');
+  setText($('vCon'), String(liveContacts(now)));
+  const link = $('link');
+  link.className = 'pill' + (DEMO ? ' demo' : ok ? ' ok' : '');
+  setText(link, DEMO ? 'DEMO' : ok ? 'LIVE' : 'OFFLINE');
+  const ssid = S.ss ? S.ss + (S.ch ? ' ch' + S.ch : '') : '';
+  setText($('info'), [S.ip, ssid, DEMO ? '' : 'CSI ' + S.csi + '/s',
+                      S.n ? S.n + (S.n === 1 ? ' viewer' : ' viewers') : ''].filter(Boolean).join(' · '));
+  drawGraph(cal);
+}
+
+// ---------------------------------------------------------------- loop -----
+let view = 0, acc = 0, lastT = performance.now(), lastPanel = 0, wasOk = false;
+try { view = +localStorage.getItem('radar.view') === 1 ? 1 : 0; } catch (_) {}
+function setView(v) {
+  view = v;
+  setText($('bView'), view ? 'PPI' : '3D');
+  try { localStorage.setItem('radar.view', String(view)); } catch (_) {}
+}
+function fit() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  const r = cv.getBoundingClientRect();
+  cv.width = Math.max(1, Math.round(r.width * dpr));
+  cv.height = Math.max(1, Math.round(r.height * dpr));
+  K = cv.width / 240;
+  const g = $('graphBox').getBoundingClientRect();
+  gcv.width = Math.max(1, Math.round(g.width * dpr));
+  gcv.height = Math.max(1, Math.round(g.height * dpr));
+  gK = dpr;
+  uiDirty = true;
+}
+function frame(t) {
+  const dt = Math.min(1000, t - lastT);
+  lastT = t;
+  acc += dt;
+  while (acc >= 125) {                      // the TFT scope ran at 8 fps: keep its pacing
+    acc -= 125;
+    stepContacts(t); stepRain(); step3D(t);
+  }
+  ctx.setTransform(K, 0, 0, K, 0, 0);
+  ctx.font = FONT; ctx.textBaseline = 'top';
+  if (view === 0) drawPPI(t); else draw3D(t);
+
+  const ok = linkOk(t);
+  if (ok !== wasOk) { wasOk = ok; uiDirty = true; }
+  if (uiDirty || t - lastPanel > 500) { uiDirty = false; lastPanel = t; updatePanel(t); }
+  requestAnimationFrame(frame);
+}
+
+cv.addEventListener('click', () => setView(1 - view));
+$('bView').addEventListener('click', () => setView(1 - view));
+$('bSnd').addEventListener('click', e => e.currentTarget.classList.toggle('on', sound.toggle()));
+for (const b of document.querySelectorAll('button[data-k]')) b.addEventListener('click', () => cmd(b.dataset.k));
+window.addEventListener('resize', fit);
+if (window.ResizeObserver) new ResizeObserver(fit).observe($('stage'));
+
+setView(view);
+fit();
+if (DEMO) startDemo();
+else {
+  connect();
+  // EventSource retries on its own; this covers half-dead sockets (phone slept).
+  setInterval(() => {
+    const now = performance.now();
+    if (now - S.last > 4000 && now - esAt > 4000) connect();
+  }, 1000);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && performance.now() - S.last > 1500) connect();
+  });
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
