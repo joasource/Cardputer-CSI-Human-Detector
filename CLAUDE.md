@@ -13,12 +13,11 @@
   was tested on Linux harnesses + headless Chromium only. A local session
   with the Cardputer plugged in can finally flash it and read the serial
   log: do the **Hardware test checklist** below before new features.
-- **No GitHub release exists yet.** Tag `v0.2.0` was NOT created (the cloud
-  session's git proxy only allows pushing its own branch; tag push got 403).
-  To publish the web-flasher `.bin`, from a local clone:
-  `git fetch origin` → `git tag v0.2.0 origin/main` →
-  `git push origin v0.2.0`, then check the Actions tab (~5 min) for
-  `cardputer-csi-v0.2.0.bin` on the Releases page.
+- **Release `v0.2.0` exists** (tag on `7ed3bc9`, asset
+  `cardputer-csi-v0.2.0.bin` for the web flasher). To rebuild it without
+  touching the tag: `gh workflow run release.yml -f tag=v0.2.0`
+  (`workflow_dispatch`; re-running updates the existing release asset).
+  A force-push of a tag at the same SHA does NOT trigger a new run.
 
 ## Goal
 A **handheld device that senses people through WiFi** using Channel State
@@ -93,7 +92,8 @@ Information (CSI). Realistic target: on-device **presence + motion**.
   `# Phone view: http://<ip>/  (http://radar.local/)`,
   `# CSI calibration: keep the room still`,
   `# CSI calibration done: N samples, amp ceil X (sigma Y), pha ceil X (sigma Y)`.
-- Release: pushing a `v*` tag runs `.github/workflows/release.yml`, which
+- Release: pushing a `v*` tag (or running the workflow manually with a `tag`
+  input) runs `.github/workflows/release.yml`, which
   builds and merges a flash-at-0x0 `.bin` for the web flasher
   (esptool.spacehuhn.com, address `0x0`).
 - Phone page preview without hardware: open `web/index.html` from disk
