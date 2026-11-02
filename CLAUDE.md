@@ -7,90 +7,120 @@
 A **handheld device that senses people through WiFi** using Channel State
 Information (CSI). Realistic target: on-device **presence + motion**.
 
-## Architecture
-- **Sensor:** ESP32-**S3** DevKit (prototype), runs `tools/sensor_s3/sensor_s3.ino`.
-  Hosts a WiFi AP (`SQUACHNET`), captures CSI from the Cardputer's own WiFi
-  frames, computes amplitude variance as a motion proxy, emits `R,...` frames
-  over UDP broadcast at ~15 Hz. **Future goal:** migrate to ESP32-C5 (MonsterC5)
-  which has a better CSI PHY.
-- **Console:** **Cardputer ADV** (ESP32-**S3**) connects to `SQUACHNET`, receives
-  UDP frames on port 4210, runs the UI, drives two screens.
+## Architecture (current: everything on the Cardputer)
+- **Device:** **Cardputer ADV** (ESP32-**S3**, StampS3, no PSRAM). It joins the
+  home WiFi as a station and measures CSI itself (promiscuous mode, frames of
+  every transmitter on the channel). One build env: `cardputer-radar-csi`
+  (`RADAR_CSI=1`). WiFi creds are picked on-device and stored in NVS
+  (`wificreds`); no creds in the repo.
+- **CSI pipeline** (`src/main.cpp`, `csiCallback` → `serviceCsi`): mean
+  amplitude + mean sin(phase) per frame over a 50-frame window → variance,
+  normalized by a running floor/max → motion = 60 % amplitude + 40 % phase.
+  Presence = motion > `kCsiThresh` (0.15, fixed), then holds/fades for 10 s.
+  `serviceCsi` injects `R,<seq>,<pres>,<motion>,<rssi>,RUN` lines into
+  `RadarLink` at 15 Hz (legacy wire format, now internal only).
+- **Spy-cam markers:** `sniffCallback` matches transmitter OUIs (ESP32, Wyze,
+  Ring, Hikvision…) and shows them as amber camera icons.
 - **Displays (different content per screen, NOT a clone):**
   - Top = external **2.8" ILI9341** (320x240 @ rotation 7): PPI **radar scope**
-    (rotating sweep + phosphor trail; motion>threshold paints stable contact
-    blips — radius from RSSI, size/heat from motion).
-  - Bottom = built-in 1.14" (240x135): WiFi IP, status pill, PRESENCE/CLEAR
-    banner, scrolling motion graph, threshold + key hints.
-  - **Phone view** (CSI build): the Cardputer serves `web/index.html` on port 80
-    (`http://<ip>/`, `http://radar.local/`, QR on `q`) and streams frames over
-    SSE (`/ev`); the phone redraws the top scope itself. Lets the device run
-    with no external TFT (menu EXT PANEL = OFF frees the 86 KB top canvas).
-- **No router needed:** S3 is the AP; Cardputer connects directly to it.
-  The Cardputer's own WiFi traffic generates the CSI frames the S3 measures.
-
-## Wire protocol (UDP port 4210, newline-terminated ASCII, ~15 Hz)
-- S3 → Cardputer: `R,<seq>,<presence 0|1>,<motion 0.000-1.000>,<rssi>,<mode>`
-  - e.g. `R,1042,1,0.37,-54,RUN`  (mode = CAL | RUN | IDLE)
-- Cardputer → S3: `CAL` | `CALSTOP` | `THR <float>` | `RATE <hz>` | `PING`→`PONG`
+    or vaporwave 3D view (`.` toggles). Blips: radius from RSSI, size/heat
+    from motion; angle is random (single antenna = no bearing).
+  - Bottom = built-in 1.14" (240x135): WiFi IP, status pill, CONTACT/CLEAR
+    banner, motion graph, footer + phone-viewer count.
+  - **Phone view:** the Cardputer serves `web/index.html` on port 80
+    (`http://<ip>/`, `http://radar.local/`, QR card at boot and on `q`) and
+    streams frames over SSE (`/ev`); the phone redraws the top scope itself.
+    For units with no external TFT: menu EXT PANEL = OFF (no top rendering,
+    86 KB top canvas freed).
+- **Removed** (commit 46a038e): the separate S3 DevKit sensor (`SQUACHNET` AP,
+  UDP 4210) and `tools/`. Leftover `RADAR_UDP` / UART code paths in
+  `main.cpp` have no build env.
 
 ## Build / run
-- `pio run -e cardputer-radar -t upload` — **fake-data mode** (`RADAR_FAKE=1`),
-  no sensor needed.
-- `pio run -e cardputer-radar-wifi -t upload` — live WiFi UDP mode; S3 must be
-  running and `SQUACHNET` must be up before the Cardputer boots.
-- `cd tools/sensor_s3 && pio run -t upload` — flash the S3 sensor (COM44).
-- `tools/fake_c5/fake_c5.ino` — spare-S3 UART emitter for wired link testing.
+- `pio run -e cardputer-radar-csi -t upload` — the only env.
+- Release: pushing a `v*` tag runs `.github/workflows/release.yml`, which
+  builds and merges a flash-at-0x0 `.bin` for the web flasher.
+- Phone page preview without hardware: open `web/index.html` from disk
+  (or add `?demo`) — runs on fake data.
+- Cloud sessions: the PlatformIO registry (`api.registry.platformio.org`,
+  `dl.registry.platformio.org`) has been blocked by the environment network
+  policy. Workaround used on 2026-11-02: platform-espressif32 v6.12.0, the
+  Espressif toolchains (crosstool-NG esp-2021r2-patch5), arduino-esp32 2.0.17,
+  esptool v4.9.0, SCons 4.11.1 and the M5 libs fetched from GitHub/PyPI into
+  `~/.platformio`, plus a scratch ini that `extends` this env with
+  `symlink://` lib_deps. Or allow those hosts in the environment settings.
 
 ## Hard constraints (don't regress these)
 - Build sets `ARDUINO_USB_CDC_ON_BOOT=1` → **`Serial` is USB-C**. Any sensor
   link MUST use a HardwareSerial (`Serial1`), never `Serial`.
 - **No PSRAM** (StampS3). Don't allocate a full 320x240 sprite. Pattern: render
-  at 240x180 and scale-to-fit (`pushRotateZoom`). Two 240x180x16bpp canvases
-  (~84 KB each) is the budget.
+  at 240x180 and scale-to-fit (`pushRotateZoom`). Budget: bottom canvas
+  240x135 (~65 KB) + top canvas 240x180 (~86 KB, only while EXT PANEL > OFF).
 - External panel = `include/ext_panel.h`: ILI9341, rotation 7,
   CS5/RST3/DC6/MOSI14/SCK40, SPI2_HOST **shared with SD** (`bus_shared=true`),
   `rgb_order=false`, 27 MHz.
 - Display libs: **M5Unified + M5Cardputer (M5GFX/LovyanGFX)**, Arduino framework,
   platform espressif32@6.12.0, board m5stack-stamps3.
+- Web server must never block `loop()`: every recv/send is `MSG_DONTWAIT`.
 
 ## Files
-- `include/radar_link.h` — protocol parser + state + 240-sample motion history +
-  command senders. No display deps. Has `injectLine()` for fake frames.
-- `src/main.cpp` — UI: `drawBottom()` (status), `drawTop()` (radar scope),
-  `drawRaycaster()` (vaporwave 3D mode), `serviceKeys()`, fake generator.
+- `src/main.cpp` — CSI callbacks, `serviceCsi()`, spy-cam sniffer, WiFi picker,
+  settings menu, `drawBottom()`, `drawTop()` (PPI), `drawRaycaster()` (3D),
+  phone-view glue (`serviceWeb()`, `drawQr()`), `serviceKeys()`.
   Bottom @30 fps, top @~8 fps.
+- `include/radar_link.h` — line parser + state + 240-sample motion history.
+  `injectLine()` is how `serviceCsi` feeds it. Its UART command senders
+  (`calibrate()`, `setThreshold()`) are no-ops in the CSI build.
 - `include/ext_panel.h` — external ILI9341 panel class.
-- `include/web_view.h` — dependency-free, never-blocking HTTP + SSE server
-  (raw lwIP sockets, MSG_DONTWAIT). Routes: `/`, `/ev`, `/cmd?k=dn|up|pal`.
-- `web/index.html` — phone view page, linked into flash via
-  `board_build.embed_txtfiles`. Opening it from disk (or `?demo`) runs on
-  fake data. SSE events: default frame `{"q","p","m"‰,"r","t"%}`, `st`
-  (1 Hz status), `hist` (240-sample history on connect).
-- `tools/sensor_s3/` — S3 CSI sensor firmware (AP mode, UDP broadcast).
-- `tools/fake_c5/fake_c5.ino` — spare-S3 UART protocol emitter.
+- `include/web_view.h` — dependency-free HTTP + SSE server on raw lwIP sockets.
+  Routes: `/`, `/ev`, `/cmd?k=dn|up|pal`. Max 5 sockets / 3 streams (oldest
+  evicted), idle preconnects recycled, streams stalled > 6 s dropped.
+- `web/index.html` — phone page, linked into flash via
+  `board_build.embed_txtfiles` (symbol `_binary_web_index_html_start`).
+  SSE events: default frame `{"q":seq,"p":0|1,"m":motion‰,"r":rssi,"t":thr%}`,
+  `st` (1 Hz: ip, ssid, ch, bat, chg, palette, CSI fps, viewers, cams),
+  `hist` (240 samples, 0..100, on connect).
+- `src/DC34.html` — unrelated standalone page ("Talking Sasquach // Field
+  Unit"), not part of the firmware.
 
 ## Status
-✅ Dual-screen UI, parser, link layer, history, radar scope — working on real
-CSI data over WiFi UDP. S3 runs as AP (`SQUACHNET`), Cardputer connects and
-receives frames. Stable contact blips with EMA smoothing.
-⚠️ `kScale=25.0f` in sensor_s3 needs tuning with real motion data.
+✅ On-device CSI presence/motion, dual-screen UI, spy-cam markers, WiFi picker.
+✅ Phone view (2026-11-02): compiles for ESP32-S3 (RAM 20.3 %, flash 32.4 %);
+   `web_view.h` tested on Linux with a socket shim + Chromium (live stream,
+   commands, reconnect, stalled/idle/excess/RST clients). Page tested in
+   headless Chromium, portrait + landscape.
+⚠️ Phone view NOT yet tested on a real Cardputer / real phones: QR scan,
+   `radar.local` (often fails on Android → use the IP), iOS Safari SSE, heap
+   headroom with the external panel ON.
+⚠️ CSI ignores frames from stations that send to the Cardputer (the phone),
+   so a phone moving in hand doesn't read as motion. Effect not measured on
+   hardware. If the Cardputer joins the phone's own hotspot, the phone IS
+   the AP and its frames are still used → keep it still.
+
+## Known issues (found, not fixed)
+- `c` (calibrate) does nothing in the CSI build, and `,` `/` threshold only
+  moves the graph line: detection uses fixed `kCsiThresh = 0.15`.
+- `RADAR_FAKE=1` doesn't compile: `serviceFake()` uses `camBlips` before its
+  declaration (pre-existing).
+- After a WiFi drop, `serviceCsi()` sets `wifiReady = false` and nothing
+  re-enables CSI until the WiFi picker runs or the device reboots.
 
 ## Next steps (priority order)
-1. **Tune `kScale`** in `sensor_s3.ino`: the variance normalization constant
-   (currently 25.0f) was guessed. Real motion data may need a different value
-   to spread the motion range across 0.0–1.0 meaningfully.
-2. **Port sensor to ESP32-C5** (MonsterC5): better CSI PHY (Wi-Fi 6), but
+1. **Hardware test of the phone view** (see ⚠️ above); check free heap.
+2. **Make threshold + calibration real in CSI mode:** use `gThreshold` instead
+   of `kCsiThresh`; `c` = reset baselines (`gCsiVar*`) for an empty-room
+   baseline, with a CALIBRATING state on screen and phone.
+3. **Auto-recover CSI after WiFi reconnects.**
+4. **Port sensor to ESP32-C5** (MonsterC5): better CSI PHY (Wi-Fi 6), but
    `wifi_csi_acquire_config_t` is different — missing fields like `lltf_en`,
-   `sig_mode`, `secondary_channel`, `ant`. Prototype on S3 first, then port.
-3. **Calibration wizard:** `c` triggers empty-room training; scope shows a
-   distinct CALIBRATING state; bottom shows progress.
-4. **Real bearing** via a 2nd antenna (RSSI/phase delta) → blip angle becomes
+   `sig_mode`, `secondary_channel`, `ant`.
+5. **Real bearing** via a 2nd antenna (RSSI/phase delta) → blip angle becomes
    meaningful, turning the scope into an actual direction finder.
-5. **Presence event log** on the bottom screen with optional SD persistence.
+6. **Presence event log** on the bottom screen / phone, optional SD persistence.
 
 ## Hardware inventory (chip cheat-sheet)
 - C5 (best CSI): MonsterC5, AWOK Dual Touch (2x each), Marauder v8.
 - C3: BLEShark Nanos (many; mesh-capable).
-- S3: Cardputer ADV (console, COM18); S3 DevKit (sensor, COM44).
+- S3: Cardputer ADV (console, COM18); S3 DevKit (former sensor, COM44).
 - Classic ESP32: Cheap Yellow Displays, HaleHound (CYD-based).
 - Not ESP32: Cardputer Zero (Raspberry Pi CM Zero), Hackberry Pi, HackRF/PortaPack.
