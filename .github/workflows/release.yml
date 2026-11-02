@@ -4,6 +4,15 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to (re)build and release, e.g. v0.2.0'
+        required: true
+        default: 'v0.2.0'
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -12,6 +21,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - uses: actions/cache@v4
         with:
@@ -27,7 +38,7 @@ jobs:
       - name: Merge binaries
         run: |
           python -m esptool --chip esp32s3 merge_bin \
-            -o cardputer-csi-${{ github.ref_name }}.bin \
+            -o cardputer-csi-${{ env.TAG }}.bin \
             --flash_mode qio --flash_size 8MB \
             0x0000 .pio/build/cardputer-radar-csi/bootloader.bin \
             0x8000 .pio/build/cardputer-radar-csi/partitions.bin \
@@ -36,5 +47,6 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: cardputer-csi-${{ github.ref_name }}.bin
+          tag_name: ${{ env.TAG }}
+          files: cardputer-csi-${{ env.TAG }}.bin
           generate_release_notes: true
